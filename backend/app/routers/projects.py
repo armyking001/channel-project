@@ -276,10 +276,16 @@ def delete_project(
                 if not row:
                     raise HTTPException(status_code=404, detail="项目不存在")
                 created_by, approval_status, project_name = row
-                if current_user.role == UserRole.normal and created_by != current_user.id:
-                    raise HTTPException(status_code=403, detail="无权删除此项目")
-                if current_user.role == UserRole.normal and approval_status != ApprovalStatus.pending_submit.value:
-                    raise HTTPException(status_code=400, detail="仅待提交状态可删除")
+                
+                # 权限控制：
+                # 1. admin 角色可以删除任何项目
+                # 2. 其他角色只能删除自己创建的、待提交状态的项目
+                is_admin = current_user.role == UserRole.admin
+                if not is_admin:
+                    if created_by != current_user.id:
+                        raise HTTPException(status_code=403, detail="无权删除此项目")
+                    if approval_status != ApprovalStatus.pending_submit.value:
+                        raise HTTPException(status_code=400, detail="仅待提交状态可删除")
                 c.execute("DELETE FROM approval_logs WHERE project_id = ?", (project_id,))
                 cur = c.execute("DELETE FROM projects WHERE id = ?", (project_id,))
                 c.commit()

@@ -72,8 +72,9 @@ export default function Projects() {
   }
 
   const canApprove = user?.role === 'admin' || user?.role === 'important'
-  // 管理员 / 重要管理员可对任何项目的"招标资料/投标文档"进行上传（通过编辑弹窗）
-  const canManageAnyFiles = user?.role === 'admin' || user?.role === 'important_admin'
+  const isAdmin = user?.role === 'admin'
+  // 是否为项目创建者
+  const isProjectCreator = (p) => p.created_by === user?.id
 
   return (
     <div>
@@ -147,15 +148,51 @@ export default function Projects() {
                 </td>
                 <td className="px-4 py-3 text-gray-500">{dayjs(p.created_at).format('YYYY-MM-DD')}</td>
                 <td className="px-4 py-3 text-center space-x-2">
-                  {/* 编辑/提交/删除：创建者本人（待提交状态），或管理员（任意状态）。编辑中含上传文件 */}
-                  {(p.approval_status === 'pending_submit' && p.created_by === user?.id) || canManageAnyFiles ? (
-                    <>
-                      <button onClick={() => { setEditData(p); setShowForm(true) }} className="text-blue-600 hover:underline">编辑</button>
-                      <button onClick={() => handleSubmit(p.id)} className="text-green-600 hover:underline">提交</button>
-                      <button onClick={() => handleDelete(p.id)} className="text-red-600 hover:underline">删除</button>
-                    </>
-                  ) : null}
-                  {/* 审批：admin 可审批任何项目，important 仅指定审批人可操作 */}
+                  {/* 操作按钮 */}
+                  {(() => {
+                    const creator = isProjectCreator(p)
+                    const status = p.approval_status
+                    
+                    // 系统管理员：任何状态都可操作
+                    if (isAdmin) {
+                      return (
+                        <>
+                          <button onClick={() => { setEditData(p); setShowForm(true) }} className="text-blue-600 hover:underline">编辑</button>
+                          {status === 'pending_submit' && (
+                            <>
+                              <button onClick={() => handleSubmit(p.id)} className="text-green-600 hover:underline">提交</button>
+                              <button onClick={() => handleDelete(p.id)} className="text-red-600 hover:underline">删除</button>
+                            </>
+                          )}
+                          {status !== 'pending_submit' && (
+                            <button onClick={() => handleDelete(p.id)} className="text-red-600 hover:underline">删除</button>
+                          )}
+                        </>
+                      )
+                    }
+                    
+                    // 项目创建者
+                    if (creator) {
+                      // 待提交状态：编辑、提交、删除
+                      if (status === 'pending_submit') {
+                        return (
+                          <>
+                            <button onClick={() => { setEditData(p); setShowForm(true) }} className="text-blue-600 hover:underline">编辑</button>
+                            <button onClick={() => handleSubmit(p.id)} className="text-green-600 hover:underline">提交</button>
+                            <button onClick={() => handleDelete(p.id)} className="text-red-600 hover:underline">删除</button>
+                          </>
+                        )
+                      }
+                      // 其他状态：只有编辑（上传文件）
+                      return (
+                        <button onClick={() => { setEditData(p); setShowForm(true) }} className="text-blue-600 hover:underline">编辑</button>
+                      )
+                    }
+                    
+                    return null
+                  })()}
+                  
+                  {/* 审批按钮：admin 可审批任何项目，指定审批人可审批 */}
                   {p.approval_status === 'pending_approval' && (user?.role === 'admin' || p.approver_id === user?.id) ? (
                     <>
                       <button onClick={() => { setSelectedProject(p); setShowApproveModal(true) }} className="text-green-600 hover:underline">通过</button>
