@@ -616,6 +616,7 @@ export default function ProjectForm({ project, onClose, onSaved }) {
                   <select value={form.win_bid_status}
                     onChange={e => setForm(f => ({ ...f, win_bid_status: e.target.value }))}
                     className={inputCls}>
+                    <option value="in_progress">进行中</option>
                     <option value="yes">中标</option>
                     <option value="no">未中标</option>
                   </select>

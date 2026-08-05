@@ -12,7 +12,7 @@ const STATUS_MAP = {
 }
 
 const WIN_MAP = {
-  yes: '是', no: '否', in_progress: '进行中'
+  yes: '中标', no: '未中标', in_progress: '进行中'
 }
 
 export default function Projects() {
@@ -155,8 +155,8 @@ export default function Projects() {
                       <button onClick={() => handleDelete(p.id)} className="text-red-600 hover:underline">删除</button>
                     </>
                   ) : null}
-                  {/* 审批：通过/驳回，admin/important 可操作 */}
-                  {p.approval_status === 'pending_approval' && canApprove ? (
+                  {/* 审批：admin 可审批任何项目，important 仅指定审批人可操作 */}
+                  {p.approval_status === 'pending_approval' && (user?.role === 'admin' || p.approver_id === user?.id) ? (
                     <>
                       <button onClick={() => { setSelectedProject(p); setShowApproveModal(true) }} className="text-green-600 hover:underline">通过</button>
                       <button onClick={() => { setSelectedProject(p); handleReject() }} className="text-red-600 hover:underline">驳回</button>

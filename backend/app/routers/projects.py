@@ -1,0 +1,405 @@
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import or_, and_, text
+from typing import List, Optional
+import logging
+import traceback
+from app.database import get_db
+from app.models import User, UserRole, Project, ApprovalLog, ApprovalStatus, ApprovalAction, FileStorageConfig, StorageMode, AuditAction
+from app.schemas import (
+    ProjectCreate, ProjectUpdate, ProjectResponse, ProjectListResponse,
+    ApprovalRequest, ApprovalLogResponse, MessageResponse
+)
+from app.auth import get_current_user, require_admin, require_important_or_admin
+from app.services.file_storage import create_project_folders
+from app.services.audit import write_audit
+from datetime import date
+
+router = APIRouter(prefix="/api/projects", tags=["项目管理"])
+log = logging.getLogger("projects")
+
+def build_project_query(db: Session, current_user: User, filters: dict):
+    q = db.query(Project).options(
+        joinedload(Project.creator),
+        joinedload(Project.approver)
+    )
+    if current_user.role == UserRole.normal:
+        # 普通账号只能看自己的
+        q = q.filter(Project.created_by == current_user.id)
+    elif current_user.role == UserRole.important:
+        # 重要账号：看自己 + 管辖范围内的
+        child_ids = [c.id for c in current_user.children]
+        child_ids.append(current_user.id)
+        # 自己是创建者：全部状态
+        # 自己是审批人：仅看已提交的（pending_approval / approved / rejected），
+        #              pending_submit（草稿）只能创建者看，避免审批人看到未提交项目
+        q = q.filter(or_(
+            Project.created_by.in_(child_ids),
+            and_(
+                Project.approver_id == current_user.id,
+                Project.approval_status != ApprovalStatus.pending_submit
+            )
+        ))
+    elif current_user.role == UserRole.important_admin:
+        # 重要管理员：看自己 + 管辖范围内的
+        child_ids = [c.id for c in current_user.children]
+        child_ids.append(current_user.id)
+        q = q.filter(or_(
+            Project.created_by.in_(child_ids),
+            and_(
+                Project.approver_id == current_user.id,
+                Project.approval_status != ApprovalStatus.pending_submit
+            )
+        ))
+    # 其他筛选
+    if filters.get("project_name"):
+        q = q.filter(Project.project_name.contains(filters["project_name"]))
+    if filters.get("partner_company"):
+        q = q.filter(Project.partner_company.contains(filters["partner_company"]))
+    if filters.get("approval_status"):
+        q = q.filter(Project.approval_status == filters["approval_status"])
+    if filters.get("win_bid_status"):
+        q = q.filter(Project.win_bid_status == filters["win_bid_status"])
+    if filters.get("start_date"):
+        q = q.filter(Project.tender_time >= date.fromisoformat(filters["start_date"]))
+    if filters.get("end_date"):
+        q = q.filter(Project.tender_time <= date.fromisoformat(filters["end_date"]))
+    return q
+
+@router.get("", response_model=ProjectListResponse)
+def list_projects(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    project_name: Optional[str] = None,
+    partner_company: Optional[str] = None,
+    approval_status: Optional[str] = None,
+    win_bid_status: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    filters = {
+        "project_name": project_name,
+        "partner_company": partner_company,
+        "approval_status": approval_status,
+        "win_bid_status": win_bid_status,
+        "start_date": start_date,
+        "end_date": end_date,
+    }
+    q = build_project_query(db, current_user, filters)
+    # 关联加载 creator/approver（前端编辑项目时需要 creator.username/real_name 拼出文件路径）
+    q = q.options(joinedload(Project.creator), joinedload(Project.approver))
+    total = q.count()
+    items = q.order_by(Project.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    return ProjectListResponse(items=items, total=total, page=page, page_size=page_size)
+
+@router.get("/{project_id}", response_model=ProjectResponse)
+def get_project(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    project = db.query(Project).options(
+        joinedload(Project.creator),
+        joinedload(Project.approver)
+    ).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    # 权限校验
+    if current_user.role == UserRole.normal and project.created_by != current_user.id:
+        raise HTTPException(status_code=403, detail="无权查看此项目")
+    if current_user.role in (UserRole.important, UserRole.important_admin):
+        child_ids = [c.id for c in current_user.children]
+        child_ids.append(current_user.id)
+        # 是创建者或下属创建：可以看
+        if project.created_by in child_ids:
+            pass
+        # 是审批人：仅看已提交状态
+        elif project.approver_id == current_user.id and project.approval_status != ApprovalStatus.pending_submit:
+            pass
+        else:
+            raise HTTPException(status_code=403, detail="无权查看此项目")
+    return project
+
+@router.post("", response_model=ProjectResponse)
+def create_project(
+    data: ProjectCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # 必填校验：项目名称 / 审批人（招标/投标时间为选填）
+    if not (data.project_name and data.project_name.strip()):
+        raise HTTPException(status_code=422, detail="项目名称不能为空")
+    if not data.approver_id:
+        raise HTTPException(status_code=422, detail="审批人为必填项")
+
+    # 检查编号唯一（空字符串视为 None — 允许多个空项目编号）
+        code = (data.project_code or '').strip() or None
+        if code:
+            existing = db.query(Project).filter(Project.project_code == code).first()
+            if existing:
+                raise HTTPException(status_code=400, detail="项目编号已存在")
+    storage_cfg = db.query(FileStorageConfig).filter(FileStorageConfig.id == 1).first()
+    tender_folder = None
+    bid_folder = None
+    if storage_cfg:
+        try:
+            folders = create_project_folders(db, storage_cfg, current_user.username, current_user.real_name, data.project_name)
+            tender_folder = folders['tender_folder']
+            bid_folder = folders['bid_folder']
+            log.warning(f"[create_project] folders ok: tender={tender_folder} bid={bid_folder}")
+        except Exception as e:
+            # 目录创建失败不阻塞项目创建，但记录警告
+            log.error(f"[create_project] 文件夹创建失败: {e}\n{traceback.format_exc()}")
+
+    payload = data.model_dump()
+    # 把空字符串规范化成 None（DB 列允许 NULL 的字段）
+    for k in ('project_code', 'partner_company', 'owner_contact_person', 'owner_contact_info',
+              'company_address', 'main_qualification', 'legal_representative',
+              'contact_person', 'contact_info', 'project_overview', 'tender_file', 'bid_file'):
+        if payload.get(k) in ('', None):
+            payload[k] = None
+
+    # 创建后自动进入"待审批"状态（用户保存即视为提交审批）
+    # 注意：若未指定审批人，保持 pending_submit（草稿），避免出现"提交了但没人审批"
+    initial_status = (
+        ApprovalStatus.pending_approval
+        if payload.get('approver_id')
+        else ApprovalStatus.pending_submit
+    )
+
+    project = Project(
+        **payload,
+        created_by=current_user.id,
+        tender_folder=tender_folder,
+        bid_folder=bid_folder,
+        approval_status=initial_status,
+    )
+    db.add(project)
+    db.commit()
+    db.refresh(project)
+    write_audit(
+        current_user, AuditAction.project_create,
+        target_type='project', target_id=project.id, target_name=project.project_name,
+        details={'project_type': data.project_type.value if hasattr(data.project_type, 'value') else str(data.project_type),
+                 'tender_folder': tender_folder, 'bid_folder': bid_folder,
+                 'expected_amount': data.expected_amount, 'cooperation_mode': str(data.cooperation_mode),
+                 'initial_status': initial_status.value},
+        request=request,
+    )
+    return project
+
+@router.put("/{project_id}", response_model=ProjectResponse)
+def update_project(
+    project_id: int,
+    data: ProjectUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    # 权限：普通账号只能编辑自己的草稿
+    if current_user.role == UserRole.normal:
+        if project.created_by != current_user.id:
+            raise HTTPException(status_code=403, detail="无权编辑此项目")
+        if project.approval_status not in [ApprovalStatus.pending_submit.value, ApprovalStatus.rejected.value]:
+            raise HTTPException(status_code=400, detail="已提交或审批中的项目不可编辑")
+    # 记录变更
+    changes = {}
+    for field, value in data.model_dump(exclude_unset=True).items():
+        old_val = getattr(project, field, None)
+        if old_val != value:
+            changes[field] = {'old': str(old_val) if old_val is not None else None,
+                              'new': str(value) if value is not None else None}
+        setattr(project, field, value)
+    db.commit()
+    db.refresh(project)
+    if changes:
+        write_audit(
+            current_user, AuditAction.project_update,
+            target_type='project', target_id=project.id, target_name=project.project_name,
+            details=changes, request=request,
+        )
+    return project
+
+def _resolve_db_path() -> str:
+    from app.database import load_config
+    cfg = load_config()
+    raw = cfg["database"]["url"].replace("sqlite:///", "", 1)
+    if raw.startswith("/") and len(raw) > 2 and raw[2] == ":":
+        raw = raw[1:]
+    return raw
+
+
+@router.delete("/{project_id}", response_model=MessageResponse)
+def delete_project(
+    project_id: int,
+    # 故意不要 db 依赖，避免 SA 持锁导致后续 sqlite3 写入失败
+    current_user: User = Depends(get_current_user)
+):
+    log.warning(f"[delete_project] start id={project_id} user={current_user.id} role={current_user.role}")
+    import sqlite3 as _sqlite3
+    import time as _time
+
+    def _do_delete():
+        path = _resolve_db_path()
+        log.warning(f"[delete_project] db path={path}")
+        # 退避重试：解决 SA 残留锁的问题
+        for attempt in range(5):
+            c = _sqlite3.connect(path, timeout=30, check_same_thread=False)
+            try:
+                c.execute("PRAGMA busy_timeout=30000")
+                c.execute("PRAGMA journal_mode=MEMORY")
+                c.execute("PRAGMA locking_mode=EXCLUSIVE")
+                row = c.execute("SELECT created_by, approval_status, project_name FROM projects WHERE id = ?", (project_id,)).fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="项目不存在")
+                created_by, approval_status, project_name = row
+                if current_user.role == UserRole.normal and created_by != current_user.id:
+                    raise HTTPException(status_code=403, detail="无权删除此项目")
+                if current_user.role == UserRole.normal and approval_status != ApprovalStatus.pending_submit.value:
+                    raise HTTPException(status_code=400, detail="仅待提交状态可删除")
+                c.execute("DELETE FROM approval_logs WHERE project_id = ?", (project_id,))
+                cur = c.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+                c.commit()
+                log.warning(f"[delete_project] rowcount={cur.rowcount} attempt={attempt}")
+                return cur.rowcount
+            except _sqlite3.OperationalError as e:
+                if "locked" in str(e) or "I/O" in str(e):
+                    log.warning(f"[delete_project] retry attempt={attempt} err={e}")
+                    _time.sleep(0.5)
+                    continue
+                raise
+            finally:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+        raise HTTPException(status_code=503, detail="数据库暂时不可用，请重试")
+
+    try:
+        result = _do_delete()
+        log.warning(f"[delete_project] ok id={project_id} result={result}")
+        # 审计
+        try:
+            write_audit(
+                current_user, AuditAction.project_delete,
+                target_type='project', target_id=project_id, target_name=project_name,
+                request=request,
+            )
+        except Exception:
+            pass
+        return MessageResponse(message="项目已删除")
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"[delete_project] error: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"删除失败: {e}")
+
+@router.post("/{project_id}/submit", response_model=ProjectResponse)
+def submit_project(
+    project_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    if project.created_by != current_user.id and current_user.role == UserRole.normal:
+        raise HTTPException(status_code=403, detail="无权提交此项目")
+    if project.approval_status != ApprovalStatus.pending_submit.value:
+        raise HTTPException(status_code=400, detail="只能提交待提交状态的项目")
+    if not project.approver_id:
+        raise HTTPException(status_code=400, detail="请先指定审批人")
+    project.approval_status = ApprovalStatus.pending_approval
+    db.commit()
+    db.refresh(project)
+    write_audit(
+        current_user, AuditAction.project_submit,
+        target_type='project', target_id=project.id, target_name=project.project_name,
+        request=request,
+    )
+    return project
+
+@router.post("/{project_id}/approve", response_model=ProjectResponse)
+def approve_project(
+    project_id: int,
+    data: ApprovalRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    # 权限检查：admin 可审批任何项目，其他角色仅指定审批人可审批
+    if current_user.role != UserRole.admin and project.approver_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权审批此项目")
+    if project.approval_status != ApprovalStatus.pending_approval.value:
+        raise HTTPException(status_code=400, detail="只能审批待审批状态的项目")
+    project.approval_status = ApprovalStatus.approved
+    log = ApprovalLog(
+        project_id=project_id,
+        approver_id=current_user.id,
+        action=ApprovalAction.approve,
+        comment=data.comment
+    )
+    db.add(log)
+    db.commit()
+    db.refresh(project)
+    write_audit(
+        current_user, AuditAction.project_approve,
+        target_type='project', target_id=project.id, target_name=project.project_name,
+        details={'comment': data.comment}, request=request,
+    )
+    return project
+
+
+@router.post("/{project_id}/reject", response_model=ProjectResponse)
+def reject_project(
+    project_id: int,
+    data: ApprovalRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    # 权限检查：admin 可审批任何项目，其他角色仅指定审批人可审批
+    if current_user.role != UserRole.admin and project.approver_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权审批此项目")
+    if project.approval_status != ApprovalStatus.pending_approval.value:
+        raise HTTPException(status_code=400, detail="只能驳回待审批状态的项目")
+    project.approval_status = ApprovalStatus.rejected
+    log = ApprovalLog(
+        project_id=project_id,
+        approver_id=current_user.id,
+        action=ApprovalAction.reject,
+        comment=data.comment
+    )
+    db.add(log)
+    db.commit()
+    db.refresh(project)
+    write_audit(
+        current_user, AuditAction.project_reject,
+        target_type='project', target_id=project.id, target_name=project.project_name,
+        details={'comment': data.comment}, request=request,
+    )
+    return project
+
+@router.get("/{project_id}/logs", response_model=List[ApprovalLogResponse])
+def get_approval_logs(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    logs = db.query(ApprovalLog).options(
+        joinedload(ApprovalLog.approver_user)
+    ).filter(ApprovalLog.project_id == project_id).order_by(ApprovalLog.created_at).all()
+    return logs
