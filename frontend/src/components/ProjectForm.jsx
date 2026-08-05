@@ -36,6 +36,7 @@ function formatTime(ts) {
 export default function ProjectForm({ project, onClose, onSaved }) {
   const { user: currentUser } = useAuthStore()
   const isEdit = !!project
+  const isAdmin = currentUser?.role === 'admin'
   const fileTenderRef = useRef(null)
   const fileBidRef = useRef(null)
 
@@ -449,11 +450,16 @@ export default function ProjectForm({ project, onClose, onSaved }) {
       {/* 顶部标题栏 */}
       <div className="flex items-center justify-between px-8 py-5 border-b bg-gradient-to-r from-blue-50 to-white">
         <h3 className="text-xl font-bold text-gray-800">
-          {isEdit ? '编辑项目（仅上传文件）' : '新建项目'}
+          {isEdit ? (isAdmin ? '编辑项目（管理员模式）' : '编辑项目（仅上传文件）') : '新建项目'}
         </h3>
         {isEdit && (
-          <span className="text-xs text-amber-600 bg-amber-50 px-2 py-1 rounded border border-amber-200">
-            🔒 项目已建，字段锁定，仅可上传/查看文件
+          <span className="text-xs px-2 py-1 rounded border"
+            style={{
+              color: isAdmin ? '#059669' : '#d97706',
+              background: isAdmin ? '#ecfdf5' : '#fffbeb',
+              borderColor: isAdmin ? '#a7f3d0' : '#fde68a'
+            }}>
+            {isAdmin ? '🛡️ 管理员权限：可修改中标状态及上传文件' : '🔒 项目已建，字段锁定，仅可上传/查看文件'}
           </span>
         )}
         <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">×</button>
@@ -461,11 +467,14 @@ export default function ProjectForm({ project, onClose, onSaved }) {
 
       <form onSubmit={handleSubmit} className="px-8 py-6">
 
-        {/* 编辑模式：只展示项目只读摘要 + 文件管理，避免误改基础字段 */}
+        {/* 编辑模式：展示项目摘要 + 文件管理 */}
         {isEdit && (
           <div className="mb-5 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-            <div className="text-sm font-bold text-blue-800 mb-2">�� 项目信息（只读）</div>
-            <div className="grid grid-cols-2 gap-x-8 gap-y-2 text-sm">
+            <div className="text-sm font-bold text-blue-800 mb-3 flex items-center gap-2">
+              📋 项目信息
+              {isAdmin && <span className="text-xs text-green-600 bg-green-100 px-2 py-0.5 rounded-full">管理员可修改中标状态</span>}
+            </div>
+            <div className="grid grid-cols-3 gap-x-8 gap-y-2 text-sm">
               <div><span className="text-gray-500">项目名称：</span><span className="text-gray-800">{form.project_name}</span></div>
               <div><span className="text-gray-500">项目类型：</span><span className="text-gray-800">{form.project_type}</span></div>
               <div><span className="text-gray-500">预计金额：</span><span className="text-gray-800">{form.expected_amount} 万元</span></div>
@@ -473,6 +482,25 @@ export default function ProjectForm({ project, onClose, onSaved }) {
               <div><span className="text-gray-500">联系人：</span><span className="text-gray-800">{form.contact_person}</span></div>
               <div><span className="text-gray-500">联系方式：</span><span className="text-gray-800">{form.contact_info}</span></div>
             </div>
+            
+            {/* 管理员可修改中标状态 */}
+            {isAdmin && (
+              <div className="mt-3 pt-3 border-t border-blue-200">
+                <div className="flex items-center gap-3">
+                  <label className="text-sm font-medium text-gray-700">中标状态（可修改）：</label>
+                  <select 
+                    value={form.win_bid_status}
+                    onChange={e => setForm(f => ({ ...f, win_bid_status: e.target.value }))}
+                    className="border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:ring-2 focus:ring-green-200 focus:border-green-500"
+                  >
+                    <option value="in_progress">进行中</option>
+                    <option value="yes">中标</option>
+                    <option value="no">未中标</option>
+                  </select>
+                  <span className="text-xs text-gray-400">修改后保存生效</span>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
