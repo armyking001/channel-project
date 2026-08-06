@@ -73,7 +73,29 @@ _*.py
 _*.log
 _*.txt
 _*.bak
+*.bak
 *.tmp
+_check_*.json
+_test_*.json
+login_body.json
+_backend_*.bat
+_diag_*.ps1
+_diag_*.bat
+_dbcheck.bat
+_start_uvi.bat
+_skip
+_check_*.py
+list_dir.py
+copy_db.py
+reset_db.py
+restart_server.py
+test_audit.py
+test_audit2.py
+test_delete_user.py
+test_file_query.py
+
+# Vite timestamp files
+*.timestamp-*.mjs
 
 # ---------- 备份目录 ----------
 channel_code/             # 老版本代码备份

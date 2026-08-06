@@ -16,7 +16,7 @@ from app.models import (
     User, UserRole, Project, ApprovalLog, ApprovalStatus, ApprovalAction
 )
 from app.schemas import ProjectListResponse, MessageResponse
-from app.auth import get_current_user
+from app.auth import get_current_user, require_not_archive
 
 router = APIRouter(prefix="/api/approvals", tags=["审批管理"])
 
@@ -30,7 +30,10 @@ def _scope_project_ids(db: Session, current_user: User, pending_only: bool = Fal
     q = db.query(Project)
     if current_user.role == UserRole.admin:
         pass  # 管理员看全部
-    elif current_user.role in (UserRole.important, UserRole.important_admin):
+    elif current_user.role == UserRole.archive:
+        # 档案管理：看全部已审批和待审批项目（不含待提交）
+        q = q.filter(Project.approval_status != ApprovalStatus.pending_submit)
+    elif current_user.role == UserRole.important:
         # 自己管辖的下属 id 集合 + 自己
         child_ids = [c.id for c in current_user.children]
         child_ids.append(current_user.id)
@@ -118,7 +121,7 @@ def approvals_summary(
 
 
 @router.post("/{project_id}/approve", response_model=MessageResponse)
-def approve(project_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def approve(project_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_not_archive)):
     from fastapi import HTTPException
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
@@ -136,7 +139,7 @@ def approve(project_id: int, db: Session = Depends(get_db), current_user: User =
 
 
 @router.post("/{project_id}/reject", response_model=MessageResponse)
-def reject(project_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def reject(project_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_not_archive)):
     from fastapi import HTTPException
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:

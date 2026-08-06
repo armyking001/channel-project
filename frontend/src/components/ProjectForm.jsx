@@ -33,10 +33,16 @@ function formatTime(ts) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
-export default function ProjectForm({ project, onClose, onSaved }) {
+// 去掉 https://host:port/ 或 http://host:port/ 前缀，只保留后面的路径部分
+function stripUrlPrefix(url) {
+  if (!url) return ''
+  return url.replace(/^https?:\/\/[^/]+\/+/, '')
+}
+
+export default function ProjectForm({ project, onClose, onSaved, readOnly = false }) {
   const { user: currentUser } = useAuthStore()
   const isEdit = !!project
-  const isAdmin = currentUser?.role === 'admin'
+  const isAdmin = currentUser?.role === 'admin' || currentUser?.role === 'important_admin'
   const fileTenderRef = useRef(null)
   const fileBidRef = useRef(null)
 
@@ -108,7 +114,8 @@ export default function ProjectForm({ project, onClose, onSaved }) {
           payload.creator_real_name = currentUser.real_name
         }
       }
-      const res = await listStorageFiles(payload)
+      const raw = await listStorageFiles(payload)
+      const res = raw?.data ?? raw
       if (folderType === 'tender') setTenderFiles(res?.files || [])
       else setBidFiles(res?.files || [])
     } catch (e) {
@@ -148,8 +155,8 @@ export default function ProjectForm({ project, onClose, onSaved }) {
           previewFileStoragePath({ project_name: form.project_name, folder_type: 'bid', ...creatorPayload }).catch(() => ({})),
         ])
         if (isSubscribed) {
-          setTenderPreview(resTender.tender_folder || resTender.path || '')
-          setBidPreview(resBid.bid_folder || resBid.path || '')
+          setTenderPreview((resTender?.data ?? resTender)?.tender_folder || (resTender?.data ?? resTender)?.path || '')
+          setBidPreview((resBid?.data ?? resBid)?.bid_folder || (resBid?.data ?? resBid)?.path || '')
         }
 
         // 2. 串行拉取文件列表，确保不会发生并发覆盖
@@ -253,7 +260,8 @@ export default function ProjectForm({ project, onClose, onSaved }) {
           listPayload.creator_real_name = creator.real_name
         }
       }
-      const res = await listStorageFiles(listPayload)
+      const raw = await listStorageFiles(listPayload)
+      const res = raw?.data ?? raw
       existingNames = new Set((res?.files || []).map(f => f.name))
     } catch (e) {
       console.error('[handleFilesPicked] list-files error:', e)
@@ -347,16 +355,18 @@ export default function ProjectForm({ project, onClose, onSaved }) {
     },
   })
 
-  const renderDropZone = (folderType, preview, uploading, inputRef) => (
+  const renderDropZone = (folderType, preview, uploading, inputRef) => {
+    const displayPath = stripUrlPrefix(preview)
+    return (
     <div
       {...makeDropHandlers(folderType)}
       onClick={() => inputRef.current?.click()}
       className="border-2 border-dashed border-gray-300 rounded-lg px-4 py-4 cursor-pointer hover:border-blue-500 hover:bg-blue-50 transition min-h-[96px] flex flex-col justify-center"
     >
-      {preview && (
-        <div className="text-[11px] text-gray-500 mb-2 truncate text-center" title={preview}>
+      {displayPath && (
+        <div className="text-[11px] text-gray-500 mb-2 truncate text-center" title={displayPath}>
           <span className="inline-block px-2 py-0.5 bg-blue-50 text-blue-700 rounded border border-blue-100">
-            📁 {preview.length > 60 ? '...' + preview.slice(-60) : preview}
+            📁 {displayPath.length > 60 ? '...' + displayPath.slice(-60) : displayPath}
           </span>
         </div>
       )}
@@ -382,7 +392,8 @@ export default function ProjectForm({ project, onClose, onSaved }) {
         }}
       />
     </div>
-  )
+    )
+  }
 
   // 文件列表（含详细资料：上传者/时间/大小/完整路径）
   const renderFileList = (fileList, folderType) => {
@@ -407,7 +418,8 @@ export default function ProjectForm({ project, onClose, onSaved }) {
                 if (existingDir) payload.target_dir = existingDir
                 if (p) { payload.creator_username = p.username; payload.creator_real_name = p.real_name }
                 else if (currentUser) { payload.creator_username = currentUser.username; payload.creator_real_name = currentUser.real_name }
-                const res = await listStorageFiles(payload)
+                const raw = await listStorageFiles(payload)
+                const res = raw?.data ?? raw
                 const files = res?.files || []
                 alert(`[refresh] ${folderType} 返回 ${files.length} 个文件\n${files.map(f=>f.name).join('\n')}`)
                 if (folderType === 'tender') setTenderFiles(files)
@@ -426,7 +438,7 @@ export default function ProjectForm({ project, onClose, onSaved }) {
           {fileList.map(f => {
             const dateStr = (f.upload_time || f.mtime) ? formatTime(f.upload_time || f.mtime) : ''
             return (
-              <li key={f.path} className="px-3 py-2 text-xs hover:bg-blue-50 group" title={f.path}>
+              <li key={f.path} className="px-3 py-2 text-xs hover:bg-blue-50 group" title={stripUrlPrefix(f.path)}>
                 <div className="flex items-center justify-between gap-2">
                   <span className="truncate flex-1 text-gray-800 font-medium" title={f.name}>
                     📄 {f.name}
@@ -450,16 +462,18 @@ export default function ProjectForm({ project, onClose, onSaved }) {
       {/* 顶部标题栏 */}
       <div className="flex items-center justify-between px-8 py-5 border-b bg-gradient-to-r from-blue-50 to-white">
         <h3 className="text-xl font-bold text-gray-800">
-          {isEdit ? (isAdmin ? '编辑项目（管理员模式）' : '编辑项目（仅上传文件）') : '新建项目'}
+          {readOnly ? '查看项目详情' : 
+            (isEdit ? (isAdmin ? '编辑项目（管理员模式）' : '编辑项目（仅上传文件）') : '新建项目')}
         </h3>
-        {isEdit && (
+        {(isEdit || readOnly) && (
           <span className="text-xs px-2 py-1 rounded border"
             style={{
-              color: isAdmin ? '#059669' : '#d97706',
-              background: isAdmin ? '#ecfdf5' : '#fffbeb',
-              borderColor: isAdmin ? '#a7f3d0' : '#fde68a'
+              color: readOnly ? '#6b7280' : (isAdmin ? '#059669' : '#d97706'),
+              background: readOnly ? '#f3f4f6' : (isAdmin ? '#ecfdf5' : '#fffbeb'),
+              borderColor: readOnly ? '#d1d5db' : (isAdmin ? '#a7f3d0' : '#fde68a')
             }}>
-            {isAdmin ? '🛡️ 管理员权限：可修改中标状态及上传文件' : '🔒 项目已建，字段锁定，仅可上传/查看文件'}
+            {readOnly ? '📖 只读查看模式' : 
+              (isAdmin ? '🛡️ 管理员权限：可修改中标状态及上传文件' : '🔒 项目已建，字段锁定，仅可上传/查看文件')}
           </span>
         )}
         <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">×</button>
@@ -504,7 +518,118 @@ export default function ProjectForm({ project, onClose, onSaved }) {
           </div>
         )}
 
-        {!isEdit && (
+        {/* 只读查看模式：显示所有字段 */}
+        {readOnly && (
+          <>
+            {/* 区域 1: 项目基本信息 */}
+            <div className="mb-5">
+              <div className="bg-gray-100 border-l-4 border-gray-400 px-3 py-1.5 mb-3">
+                <span className="text-sm font-bold text-gray-700">项目基本信息</span>
+              </div>
+              <div className="grid grid-cols-2 gap-x-8 gap-y-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">项目名称</label>
+                  <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.project_name || '-'}</div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">项目编号</label>
+                  <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.project_code || '-'}</div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">项目类型</label>
+                  <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.project_type || '-'}</div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">预计金额（万元）</label>
+                  <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.expected_amount || '-'}</div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">招标时间</label>
+                  <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.tender_time || '-'}</div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">投标时间</label>
+                  <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.bid_time || '-'}</div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">业主联系人</label>
+                  <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.owner_contact_person || '-'}</div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">业主联系方式</label>
+                  <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.owner_contact_info || '-'}</div>
+                </div>
+              </div>
+            </div>
+
+            {/* 区域 2: 合作基本情况 */}
+            <div className="mb-5">
+              <div className="bg-gray-100 border-l-4 border-gray-400 px-3 py-1.5 mb-3">
+                <span className="text-sm font-bold text-gray-700">合作基本情况</span>
+              </div>
+              <div className="grid grid-cols-2 gap-x-8 gap-y-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">公司名称</label>
+                  <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.partner_company || '-'}</div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">公司地址</label>
+                  <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.company_address || '-'}</div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">主要资质</label>
+                  <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.main_qualification || '-'}</div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">法定代表</label>
+                  <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.legal_representative || '-'}</div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">联系人</label>
+                  <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.contact_person || '-'}</div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">联系方式</label>
+                  <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.contact_info || '-'}</div>
+                </div>
+              </div>
+            </div>
+
+            {/* 区域 3: 合作模式与费用 */}
+            <div className="mb-5">
+              <div className="bg-gray-100 border-l-4 border-gray-400 px-3 py-1.5 mb-3">
+                <span className="text-sm font-bold text-gray-700">合作模式与费用</span>
+              </div>
+              <div className="grid grid-cols-2 gap-x-8 gap-y-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">合作模式</label>
+                  <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.cooperation_mode === 'long_term' ? '长期合作' : '短期合作'}</div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">费用模式</label>
+                  <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.fee_mode === 'mutual' ? '互免' : '收费'}</div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">费用金额（元）</label>
+                  <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.fee_amount || '-'}</div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">是否SM</label>
+                  <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.is_sm === 'yes' ? '是' : '否'}</div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">中标状态</label>
+                  <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">
+                    {form.win_bid_status === 'in_progress' ? '进行中' : form.win_bid_status === 'yes' ? '中标' : '未中标'}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* 新建模式表单 */}
+        {!isEdit && !readOnly && (
           <>
             {/* 区域 1: 项目基本信息 */}
             <div className="mb-5">
@@ -721,9 +846,9 @@ export default function ProjectForm({ project, onClose, onSaved }) {
         <div className="flex justify-end gap-3 pt-5 border-t mt-6">
           <button type="button" onClick={onClose}
             className="px-6 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50 transition">
-            {isEdit ? '关闭' : '取消'}
+            {readOnly ? '关闭' : (isEdit ? '关闭' : '取消')}
           </button>
-          {isEdit ? (
+          {!readOnly && (isEdit ? (
             <button type="button" onClick={onClose}
               className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition shadow-sm">
               完成
@@ -733,7 +858,7 @@ export default function ProjectForm({ project, onClose, onSaved }) {
               className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition shadow-sm">
               保存
             </button>
-          )}
+          ))}
         </div>
       </form>
 

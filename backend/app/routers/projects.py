@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import or_, and_, text
+from sqlalchemy import or_, and_, text, func
 from typing import List, Optional
 import logging
 import traceback
@@ -10,7 +10,7 @@ from app.schemas import (
     ProjectCreate, ProjectUpdate, ProjectResponse, ProjectListResponse,
     ApprovalRequest, ApprovalLogResponse, MessageResponse
 )
-from app.auth import get_current_user, require_admin, require_important_or_admin
+from app.auth import get_current_user, require_admin, require_important_or_admin, require_not_archive
 from app.services.file_storage import create_project_folders
 from app.services.audit import write_audit
 from datetime import date
@@ -30,9 +30,6 @@ def build_project_query(db: Session, current_user: User, filters: dict):
         # 重要账号：看自己 + 管辖范围内的
         child_ids = [c.id for c in current_user.children]
         child_ids.append(current_user.id)
-        # 自己是创建者：全部状态
-        # 自己是审批人：仅看已提交的（pending_approval / approved / rejected），
-        #              pending_submit（草稿）只能创建者看，避免审批人看到未提交项目
         q = q.filter(or_(
             Project.created_by.in_(child_ids),
             and_(
@@ -40,17 +37,9 @@ def build_project_query(db: Session, current_user: User, filters: dict):
                 Project.approval_status != ApprovalStatus.pending_submit
             )
         ))
-    elif current_user.role == UserRole.important_admin:
-        # 重要管理员：看自己 + 管辖范围内的
-        child_ids = [c.id for c in current_user.children]
-        child_ids.append(current_user.id)
-        q = q.filter(or_(
-            Project.created_by.in_(child_ids),
-            and_(
-                Project.approver_id == current_user.id,
-                Project.approval_status != ApprovalStatus.pending_submit
-            )
-        ))
+    elif current_user.role == UserRole.archive:
+        # 档案管理：看全部项目（只读）
+        pass
     # 其他筛选
     if filters.get("project_name"):
         q = q.filter(Project.project_name.contains(filters["project_name"]))
@@ -61,9 +50,15 @@ def build_project_query(db: Session, current_user: User, filters: dict):
     if filters.get("win_bid_status"):
         q = q.filter(Project.win_bid_status == filters["win_bid_status"])
     if filters.get("start_date"):
-        q = q.filter(Project.tender_time >= date.fromisoformat(filters["start_date"]))
+        # 填报日期（按 created_at 日期部分筛选）
+        q = q.filter(func.date(Project.created_at) >= date.fromisoformat(filters["start_date"]))
     if filters.get("end_date"):
-        q = q.filter(Project.tender_time <= date.fromisoformat(filters["end_date"]))
+        q = q.filter(func.date(Project.created_at) <= date.fromisoformat(filters["end_date"]))
+    if filters.get("min_amount") is not None:
+        # 前端传的是万元，乘以 10000 转成元（数据库存的是元）
+        q = q.filter(Project.project_amount >= float(filters["min_amount"]) * 10000)
+    if filters.get("max_amount") is not None:
+        q = q.filter(Project.project_amount <= float(filters["max_amount"]) * 10000)
     return q
 
 @router.get("", response_model=ProjectListResponse)
@@ -76,6 +71,8 @@ def list_projects(
     win_bid_status: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    min_amount: Optional[float] = None,
+    max_amount: Optional[float] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -86,6 +83,8 @@ def list_projects(
         "win_bid_status": win_bid_status,
         "start_date": start_date,
         "end_date": end_date,
+        "min_amount": min_amount,
+        "max_amount": max_amount,
     }
     q = build_project_query(db, current_user, filters)
     # 关联加载 creator/approver（前端编辑项目时需要 creator.username/real_name 拼出文件路径）
@@ -109,7 +108,7 @@ def get_project(
     # 权限校验
     if current_user.role == UserRole.normal and project.created_by != current_user.id:
         raise HTTPException(status_code=403, detail="无权查看此项目")
-    if current_user.role in (UserRole.important, UserRole.important_admin):
+    if current_user.role == UserRole.important:
         child_ids = [c.id for c in current_user.children]
         child_ids.append(current_user.id)
         # 是创建者或下属创建：可以看
@@ -120,6 +119,7 @@ def get_project(
             pass
         else:
             raise HTTPException(status_code=403, detail="无权查看此项目")
+    # archive 角色可以查看所有项目
     return project
 
 @router.post("", response_model=ProjectResponse)
@@ -127,7 +127,7 @@ def create_project(
     data: ProjectCreate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_not_archive)
 ):
     # 必填校验：项目名称 / 审批人（招标/投标时间为选填）
     if not (data.project_name and data.project_name.strip()):
@@ -197,7 +197,7 @@ def update_project(
     data: ProjectUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_not_archive)
 ):
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
@@ -256,7 +256,7 @@ def _resolve_db_path() -> str:
 def delete_project(
     project_id: int,
     # 故意不要 db 依赖，避免 SA 持锁导致后续 sqlite3 写入失败
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_not_archive)
 ):
     log.warning(f"[delete_project] start id={project_id} user={current_user.id} role={current_user.role}")
     import sqlite3 as _sqlite3
@@ -328,7 +328,7 @@ def submit_project(
     project_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_not_archive)
 ):
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
@@ -355,7 +355,7 @@ def approve_project(
     data: ApprovalRequest,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_not_archive)
 ):
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
@@ -389,7 +389,7 @@ def reject_project(
     data: ApprovalRequest,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_not_archive)
 ):
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:

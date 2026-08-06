@@ -26,13 +26,14 @@ def _scoped_query(db: Session, current_user: User):
     q = db.query(Project)
     if current_user.role == UserRole.normal:
         q = q.filter(Project.created_by == current_user.id)
-    elif current_user.role in (UserRole.important, UserRole.important_admin):
+    elif current_user.role == UserRole.important:
         child_ids = [c.id for c in current_user.children]
         child_ids.append(current_user.id)
         q = q.filter(or_(
             Project.created_by.in_(child_ids),
             Project.approver_id == current_user.id,
         ))
+    # admin 和 archive 角色可以查看所有项目
     return q
 
 
