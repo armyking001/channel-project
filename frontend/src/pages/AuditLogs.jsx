@@ -68,8 +68,10 @@ function formatDetails(d) {
 
 function formatTime(s) {
   if (!s) return '-'
-  // 直接用 ISO 字符串，浏览器会按本地时区显示
-  return s.replace('T', ' ').slice(0, 19)
+  // 后端返回的是 UTC ISO 字符串,加 Z 后浏览器会按本地时区解析
+  // ISO 字符串若已含时区则直接解析,否则视为 UTC
+  const iso = s.includes('Z') || /[+-]\d{2}:?\d{2}$/.test(s) ? s : (s + 'Z')
+  return new Date(iso).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' })
 }
 
 export default function AuditLogs() {

@@ -73,13 +73,13 @@ export default function Login() {
         {error && <div className="bg-red-50 text-red-600 p-3 rounded mb-4 text-sm">{error}</div>}
         <form onSubmit={handleSubmit}>
           <div className="mb-4">
-            <label className="block text-sm font-medium text-gray-700 mb-1">账号</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">账号 / 姓名</label>
             <input
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-              placeholder="请输入账号"
+              placeholder="请输入账号或姓名"
               required
             />
           </div>
@@ -181,10 +181,18 @@ export default function Login() {
                 <div className="bg-gray-50 p-4 rounded mb-4 text-sm">
                   <div className="mb-2"><span className="text-gray-500">姓名：</span><strong>{applyResult.real_name}</strong></div>
                   <div className="mb-2"><span className="text-gray-500">账号：</span><strong className="text-blue-600 text-base">{applyResult.username}</strong></div>
+                  {applyResult.initial_password && (
+                    <div className="mb-2">
+                      <span className="text-gray-500">初始密码：</span>
+                      <strong className="text-red-600 text-base font-mono select-all">{applyResult.initial_password}</strong>
+                    </div>
+                  )}
                   <div><span className="text-gray-500">状态：</span><span className="text-orange-600">待审核</span></div>
                 </div>
                 <div className="text-xs text-gray-500 mb-4 leading-relaxed">
-                  请将账号告知系统管理员，由管理员在「用户管理」处为您设置初始密码并启用账号。
+                  {applyResult.initial_password
+                    ? <>请<span className="text-red-600 font-medium">妥善保存初始密码</span>，管理员审核通过后即可用该账号与密码登录系统。</>
+                    : <>请将账号告知系统管理员，由管理员在「用户管理」处为您设置初始密码并启用账号。</>}
                 </div>
                 <div className="flex justify-end">
                   <button

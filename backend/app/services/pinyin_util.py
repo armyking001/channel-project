@@ -119,6 +119,26 @@ _GIVEN_NAME_PINYIN = {
     # 单字名常用
     '伟': 'wei', '芳': 'fang', '娜': 'na', '敏': 'min', '静': 'jing',
     '丽': 'li', '强': 'qiang', '磊': 'lei', '军': 'jun', '洋': 'yang',
+    '世': 'shi', '间': 'jian', '人': 'ren',
+    '涛': 'tao', '明': 'ming', '超': 'chao', '霞': 'xia', '平': 'ping', '刚': 'gang',
+    '俊': 'jun', '峰': 'feng', '凯': 'kai', '亮': 'liang', '辉': 'hui', '健': 'jian',
+    '雄': 'xiong', '豪': 'hao', '玲': 'ling', '慧': 'hui', '洁': 'jie',
+    '杰': 'jie', '娟': 'juan', '勇': 'yong', '艳': 'yan',
+    '宇': 'yu', '宙': 'zhou', '洪': 'hong', '波': 'bo',
+    '湖': 'hu', '海': 'hai', '江': 'jiang', '河': 'he', '溪': 'xi',
+    '德': 'de', '仁': 'ren', '义': 'yi', '礼': 'li', '智': 'zhi',
+    '信': 'xin', '忠': 'zhong', '孝': 'xiao', '廉': 'lian',
+    '一': 'yi', '二': 'er', '三': 'san', '四': 'si', '五': 'wu',
+    '六': 'liu', '七': 'qi', '八': 'ba', '九': 'jiu', '十': 'shi',
+    '梦': 'meng', '醒': 'xing', '睡': 'shui', '醉': 'zui',
+    '天': 'tian', '地': 'di', '心': 'xin', '手': 'shou',
+    '美': 'mei', '丑': 'chou', '善': 'shan', '恶': 'e',
+    '爱': 'ai', '恨': 'hen', '喜': 'xi', '怒': 'nu', '哀': 'ai',
+    '乐': 'le', '悲': 'bei', '思': 'si', '念': 'nian', '想': 'xiang',
+    '春': 'chun', '夏': 'xia', '秋': 'qiu', '冬': 'dong',
+    '东': 'dong', '南': 'nan', '西': 'xi', '北': 'bei',
+    '小': 'xiao', '大': 'da', '中': 'zhong', '国': 'go', '华': 'hua',
+    '建': 'jian', '文': 'wen', '武': 'wu', '志': 'zhi',
     '勇': 'yong', '艳': 'yan', '杰': 'jie', '娟': 'juan', '涛': 'tao',
     '明': 'ming', '超': 'chao', '霞': 'xia', '平': 'ping', '刚': 'gang',
     '桂英': 'guiying', '桂兰': 'guilan', '建华': 'jianhua', '建平': 'jianping',
@@ -339,12 +359,17 @@ def _is_known_surname(ch: str) -> bool:
 
 def generate_username(real_name: str) -> str:
     """根据姓名生成账号。
-    规则：名的所有汉字首字母 + 姓全拼（姓在最后）
+    规则：名所有字首字母 + 姓全拼（姓在最后）
+    拆分策略：
+      - 中文姓名顺序为「姓在前、名在后」
+      - 第 1 个字默认作为姓
+      - 第 1-2 个字若在已知复姓字典里 → 复姓
+      - 若第 1 字不在姓氏字典里，从右往左兜底寻找已知姓
     例子：
-        张三      → s + zhang = szhang
-        李俊峰    → jf + li = jfli
-        王小明    → xm + wang = xmwang
-        欧阳明    → m + ouyang = mouyang  （复姓）
+        人世间    → s + j + ren   = sjren
+        张三      → s + zhang     = szhang
+        李俊峰    → j + f + li    = jfli
+        欧阳明    → m + ouyang    = mouyang  （复姓）
     失败 fallback: 长度 < 2 时直接用拼音首字母
     """
     if not real_name:
@@ -355,32 +380,22 @@ def generate_username(real_name: str) -> str:
         # 1 字：直接用全拼
         return get_pinyin_full(real_name[0]) or 'user'
 
-    # 中文姓名：姓在前、名在后（与用户例子一致：szhang = 三首字母 + 张全拼）
-    # 拆分策略：
-    #   - 复姓：开头 2 字是复姓 → 姓=前 2 字, 名=后续
-    #   - 单字姓：开头 1 字是姓 → 姓=第 1 字, 名=后续
+    # 拆分姓与名
     surname_part = ''
     name_part = ''
 
-    # 先尝试复姓（开头 2 字）
+    # 先尝试复姓（开头 2 字是已知复姓）
     if len(real_name) >= 2 and _is_known_surname(real_name[:2]):
         surname_part = _SURNAME_PINYIN[real_name[:2]]
         name_part = real_name[2:]
     else:
-        # 单字姓：第 1 字必须是"已知姓氏"
+        # 单字姓：第 1 字默认为姓（中文姓名通用规则，「姓在前名在后」）
+        # 即便第 1 字不在姓氏字典里也照常作为姓
         first_char = real_name[0]
-        if _is_known_surname(first_char):
-            surname_part = _SURNAME_PINYIN[first_char]
-            name_part = real_name[1:]
-        else:
-            # 第 1 字不在姓氏字典里：从右往左找"已知姓氏"（兜底）
-            # 例如"张三"中"张"是姓，但"三"不是 → 我们能识别出"张"在 index 0
-            for i in range(len(real_name) - 1, -1, -1):
-                if _is_known_surname(real_name[i]):
-                    # 姓 = real_name[i], 名 = real_name[:i] + real_name[i+1:]
-                    surname_part = _SURNAME_PINYIN[real_name[i]]
-                    name_part = real_name[:i] + real_name[i+1:]
-                    break
+        surname_part = _SURNAME_PINYIN.get(first_char) or get_pinyin_full(first_char)
+        name_part = real_name[1:]
+        if not surname_part:
+            surname_part = 'x'
 
     if not surname_part:
         # 没识别出姓：整字全拼 + 末字首字母（保守回退）

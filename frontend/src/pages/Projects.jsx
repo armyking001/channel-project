@@ -1,8 +1,13 @@
 import { useState, useEffect } from 'react'
-import { getProjects, deleteProject, submitProject, approveProject, rejectProject } from '../api'
+import { getProjects, deleteProject, submitProject, approveProject, rejectProject, withdrawProject } from '../api'
 import { useAuthStore } from '../stores/auth'
 import ProjectForm from '../components/ProjectForm'
 import dayjs from 'dayjs'
+import utc from 'dayjs/plugin/utc'
+import timezone from 'dayjs/plugin/timezone'
+
+dayjs.extend(utc)
+dayjs.extend(timezone)
 
 const STATUS_MAP = {
   pending_submit: { label: '待提交', color: 'bg-gray-100 text-gray-600' },
@@ -56,8 +61,12 @@ export default function Projects() {
   }
 
   const handleSubmit = async (id) => {
-    await submitProject(id)
-    fetchProjects()
+    try {
+      await submitProject(id)
+      fetchProjects()
+    } catch (err) {
+      alert('提交失败：' + (err?.response?.data?.detail || err?.message || '未知错误'))
+    }
   }
 
   const handleApprove = async () => {
@@ -74,6 +83,16 @@ export default function Projects() {
     await rejectProject(selectedProject.id, { comment })
     setSelectedProject(null)
     fetchProjects()
+  }
+
+  const handleWithdraw = async (p) => {
+    if (!confirm(`确定要撤回项目 "${p.project_name}" 吗？\n撤回后项目状态将回到"待提交"，可以重新编辑。\n注：NAS 上的项目目录和已上传文件不会被删除。`)) return
+    try {
+      await withdrawProject(p.id)
+      fetchProjects()
+    } catch (err) {
+      alert('撤回失败：' + (err.response?.data?.detail || err.message))
+    }
   }
 
   const canApprove = user?.role === 'admin' || user?.role === 'important'
@@ -171,25 +190,26 @@ export default function Projects() {
         <table className="w-full text-sm">
           <thead className="bg-gray-50 border-b">
             <tr>
-              <th className="px-4 py-3 text-left">序号</th>
+              <th className="px-4 py-3 text-left whitespace-nowrap">序号</th>
               <th className="px-4 py-3 text-left">项目名称</th>
               <th className="px-4 py-3 text-left">编号</th>
               <th className="px-4 py-3 text-left">合作单位</th>
               <th className="px-4 py-3 text-left">金额(万元)</th>
               <th className="px-4 py-3 text-left">中标</th>
               <th className="px-4 py-3 text-left">状态</th>
+              <th className="px-4 py-3 text-left">创建人</th>
               <th className="px-4 py-3 text-left">填报时间</th>
               <th className="px-4 py-3 text-center">操作</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={9} className="text-center py-8 text-gray-400">加载中...</td></tr>
+              <tr><td colSpan={10} className="text-center py-8 text-gray-400">加载中...</td></tr>
             ) : projects.length === 0 ? (
-              <tr><td colSpan={9} className="text-center py-8 text-gray-400">暂无数据</td></tr>
+              <tr><td colSpan={10} className="text-center py-8 text-gray-400">暂无数据</td></tr>
             ) : projects.map((p, idx) => (
               <tr key={p.id} className="border-b hover:bg-gray-50">
-                <td className="px-4 py-3 text-gray-500">{(page - 1) * 20 + idx + 1}</td>
+                <td className="px-4 py-3 text-gray-500 whitespace-nowrap">{(page - 1) * 20 + idx + 1}</td>
                 <td className="px-4 py-3 font-medium">{p.project_name}</td>
                 <td className="px-4 py-3 text-gray-500">{p.project_code}</td>
                 <td className="px-4 py-3">{p.partner_company}</td>
@@ -200,21 +220,15 @@ export default function Projects() {
                     {STATUS_MAP[p.approval_status]?.label}
                   </span>
                 </td>
-                <td className="px-4 py-3 text-gray-500">{dayjs(p.created_at).format('YYYY-MM-DD')}</td>
+                <td className="px-4 py-3 text-gray-700">{p.creator?.real_name || p.created_by_username || '-'}</td>
+                <td className="px-4 py-3 text-gray-500">{p.created_at ? dayjs.utc(p.created_at).tz('Asia/Shanghai').format('YYYY-MM-DD HH:mm') : '-'}</td>
                 <td className="px-4 py-3 text-center space-x-2">
                   {/* 操作按钮 */}
                   {(() => {
-                    // 档案管理：只能查看
-                    if (isArchive) {
-                      return (
-                        <button onClick={() => { setEditData(p); setShowViewForm(true) }} className="text-gray-600 hover:underline">查看</button>
-                      )
-                    }
-                    
-                    const creator = isProjectCreator(p)
                     const status = p.approval_status
-                    
-                    // 系统管理员：任何状态都可操作（编辑 + 查看 + 删除）
+                    const creator = isProjectCreator(p)
+
+                    // 系统管理员：编辑 + 查看 + 删除
                     if (isAdmin) {
                       return (
                         <>
@@ -224,41 +238,47 @@ export default function Projects() {
                         </>
                       )
                     }
-                    
-                    // 项目创建者
-                    if (creator) {
-                      // 待提交状态：编辑 + 查看 + 删除
-                      if (status === 'pending_submit') {
-                        return (
-                          <>
-                            <button onClick={() => { setEditData(p); setShowForm(true) }} className="text-blue-600 hover:underline">编辑</button>
-                            <button onClick={() => { setEditData(p); setShowViewForm(true) }} className="text-gray-600 hover:underline">查看</button>
-                            <button onClick={() => handleDelete(p.id)} className="text-red-600 hover:underline">删除</button>
-                          </>
-                        )
-                      }
-                      // 其他状态：编辑、查看（不能删除）
+
+                    // 重要账号：只查看（编辑/审批去审批管理）
+                    if (user?.role === 'important') {
                       return (
-                        <>
-                          <button onClick={() => { setEditData(p); setShowForm(true) }} className="text-blue-600 hover:underline">编辑</button>
-                          <button onClick={() => { setEditData(p); setShowViewForm(true) }} className="text-gray-600 hover:underline">查看</button>
-                        </>
+                        <button onClick={() => { setEditData(p); setShowViewForm(true) }} className="text-gray-600 hover:underline">查看</button>
                       )
                     }
-                    
-                    // 其他用户：只能查看
-                    return (
-                      <button onClick={() => { setEditData(p); setShowViewForm(true) }} className="text-gray-600 hover:underline">查看</button>
-                    )
+
+                    // 档案管理：只查看
+                    if (isArchive) {
+                      return (
+                        <button onClick={() => { setEditData(p); setShowViewForm(true) }} className="text-gray-600 hover:underline">查看</button>
+                      )
+                    }
+
+                    // 普通账号：编辑（上传文件）+ 查看 +（自己的项目在待审批/已驳回时可撤回）
+                    const buttons = [
+                      <button key="edit" onClick={() => { setEditData(p); setShowForm(true) }} className="text-blue-600 hover:underline">编辑</button>,
+                      <button key="view" onClick={() => { setEditData(p); setShowViewForm(true) }} className="text-gray-600 hover:underline">查看</button>,
+                    ]
+                    // 自己的项目：待审批/已驳回时可撤回
+                    if (creator && (status === 'pending_approval' || status === 'rejected')) {
+                      buttons.push(
+                        <button key="withdraw" onClick={() => handleWithdraw(p)} className="text-orange-600 hover:underline">撤回</button>
+                      )
+                    }
+                    // 自己的项目：待提交时可"继续提交"
+                    if (creator && status === 'pending_submit') {
+                      buttons.push(
+                        <button key="submit" onClick={() => {
+                          if (confirm(`确定继续提交项目 "${p.project_name}" 进入审批流程吗？`)) {
+                            handleSubmit(p.id)
+                          }
+                        }} className="text-purple-600 hover:underline">继续提交</button>
+                      )
+                    }
+                    return <>{buttons}</>
                   })()}
-                  
-                  {/* 审批按钮 */}
-                  {p.approval_status === 'pending_approval' && (user?.role === 'admin' || user?.role === 'important' || p.approver_id === user?.id) ? (
-                    <>
-                      <button onClick={() => { setSelectedProject(p); setShowApproveModal(true) }} className="text-green-600 hover:underline">通过</button>
-                      <button onClick={() => { setSelectedProject(p); handleReject() }} className="text-red-600 hover:underline">驳回</button>
-                    </>
-                  ) : null}
+
+                  {/* 审批按钮 —— 通过/驳回统一在审批管理中处理，项目列表不再显示 */}
+                  {null}
                 </td>
               </tr>
             ))}
@@ -279,6 +299,14 @@ export default function Projects() {
           <div className="bg-white rounded-lg shadow-2xl max-h-[92vh] overflow-auto">
             <ProjectForm
               project={editData}
+              withdrawMode={
+                // 仅普通账号 + 自己创建 + 状态为 pending_submit 且最近一次动作是 withdraw 才算撤回修改
+                !!editData &&
+                user?.role === 'normal' &&
+                editData.created_by === user?.id &&
+                editData.approval_status === 'pending_submit'
+              }
+              onDelete={editData && user?.role === 'normal' && editData.created_by === user?.id ? () => handleDelete(editData.id) : undefined}
               onClose={() => setShowForm(false)}
               onSaved={() => { setShowForm(false); fetchProjects() }}
             />

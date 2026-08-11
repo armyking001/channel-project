@@ -138,14 +138,20 @@ def ensure_webdav_folders(root_url: str, subfolders: list,
     """WebDAV 模式：递归 MKCOL 建目录
     root_url: 不含子目录的基础 URL（如 https://nas/dav/项目根目录）
     subfolders: ['招标资料', '投标文档']
+    兼容 NAS 上 PROPFIND 报 405（Method Not Allowed）的场景——直接当目录存在处理
     """
     # 先测根目录
     ok, msg = webdav_request('PROPFIND', root_url, username, password)
     if not ok:
-        # 根目录可能不存在，尝试 MKCOL
-        ok2, msg2 = webdav_request('MKCOL', root_url, username, password)
-        if not ok2:
-            return False, f'根目录不可访问且创建失败: {msg2}'
+        # 405 也视为"已存在"（NAS 不支持 PROPFIND）——直接跳过 MKCOL
+        if '405' in msg:
+            pass  # 视为存在，继续创建子目录
+        else:
+            # 根目录可能不存在，尝试 MKCOL
+            ok2, msg2 = webdav_request('MKCOL', root_url, username, password)
+            # MKCOL 报 405（已存在）也视为成功
+            if not ok2 and '405' not in msg2:
+                return False, f'根目录不可访问且创建失败: {msg2}'
 
     created = []
     for sub in subfolders:
@@ -154,9 +160,14 @@ def ensure_webdav_folders(root_url: str, subfolders: list,
         if ok:
             created.append(f'{sub}(已存在)')
             continue
+        # PROPFIND 失败时尝试 MKCOL
         ok, msg = webdav_request('MKCOL', sub_url, username, password)
-        if ok:
-            created.append(f'{sub}(新建)')
+        # MKCOL 405 也视为成功（目录已存在）
+        if ok or '405' in msg:
+            if ok:
+                created.append(f'{sub}(新建)')
+            else:
+                created.append(f'{sub}(已存在)')
         else:
             return False, f'子目录 {sub} 创建失败: {msg}'
     return True, 'WebDAV 目录就绪: ' + ', '.join(created)

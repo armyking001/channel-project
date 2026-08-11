@@ -24,6 +24,7 @@ class UserUpdate(BaseModel):
     role: Optional[UserRole] = None
     parent_id: Optional[int] = None
     is_active: Optional[bool] = None
+    password: Optional[str] = Field(default=None, min_length=6)  # 审批通过时设置密码
 
 class UserPasswordReset(BaseModel):
     new_password: str = Field(..., min_length=6)
@@ -37,6 +38,7 @@ class UserResponse(BaseModel):
     parent_id: Optional[int]
     is_active: bool
     is_rejected: bool = False
+    pending_password: Optional[str] = None  # 仅"待审批"用户返回，审批后清除
     created_at: datetime
 
 class UserLogin(BaseModel):
@@ -47,6 +49,15 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserResponse
+
+
+class ApplyAccountResponse(BaseModel):
+    """申请账号响应"""
+    username: str
+    real_name: str
+    status: str  # "pending"
+    message: str
+    initial_password: Optional[str] = None  # 系统生成的 8 位随机初始密码（返回给申请人保存）
 
 # ============ 项目 ============
 class ProjectBase(BaseModel):

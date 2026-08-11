@@ -27,6 +27,25 @@ def _request(method, url, config, timeout=10, extra_headers=None, depth='1'):
     if url.startswith('http') and ' ' in url:
         import re as _re
         url = _re.sub(r'([\u4e00-\u9fff])\s+([\u4e00-\u9fff])', r'\1%20\2', url)
+    # 容错：把 + 号编码为 %2B（避免被 URL 解析成空格）
+    if url.startswith('http') and '+' in url:
+        import re as _re
+        # 只编码路径中的 +（不影响 query string）
+        scheme_end = url.find('://') + 3
+        path_start = url.find('/', scheme_end)
+        if path_start > 0:
+            scheme_netloc = url[:path_start]
+            path_and_query = url[path_start:]
+            # 分割 path 和 query
+            query_idx = path_and_query.find('?')
+            if query_idx > 0:
+                path = path_and_query[:query_idx]
+                query = path_and_query[query_idx:]
+            else:
+                path = path_and_query
+                query = ''
+            path = path.replace('+', '%2B')
+            url = scheme_netloc + path + query
     headers = {'User-Agent': 'channel-project-storage/1.0'}
     if method.upper() == 'PROPFIND':
         headers['Depth'] = depth
@@ -77,13 +96,16 @@ def _ensure_parent_dir(url: str, config, timeout: int = 15):
             r = _request('PROPFIND', dir_url, config, timeout=timeout)
             if 200 <= r.status_code < 300:
                 continue
-            if r.status_code not in (404,):
-                # 非 404 的错误（如 401/403）直接报错
-                return False, f'目录检查失败 {dir_url}: HTTP {r.status_code}'
-            # 404 则尝试 MKCOL
+            # 404 明确不存在；405/403/400 等其他错误可能是 Synology WebDAV 限制，
+            # 不应阻塞上传 — 直接尝试 MKCOL
             r2 = _request('MKCOL', dir_url, config, timeout=timeout)
-            if not (200 <= r2.status_code < 300):
-                return False, f'目录创建失败 {dir_url}: HTTP {r2.status_code} {r2.text[:100]}'
+            if 200 <= r2.status_code < 300:
+                continue
+            # MKCOL 返回 405 通常表示目录已存在（Synology 行为）
+            if r2.status_code in (405, 301, 302):
+                # 视为已存在，继续
+                continue
+            return False, f'目录创建失败 {dir_url}: PROPFIND={r.status_code}, MKCOL={r2.status_code} {r2.text[:100]}'
         except Exception as e:
             return False, f'目录异常 {dir_url}: {e}'
     return True, '目录就绪'

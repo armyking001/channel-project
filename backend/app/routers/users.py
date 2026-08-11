@@ -130,6 +130,9 @@ def update_user(
     if user_data.is_active is not None and user_data.is_active != user.is_active:
         changes['is_active'] = {'old': user.is_active, 'new': user_data.is_active}
         user.is_active = user_data.is_active
+    if user_data.password:
+        user.password_hash = hash_password(user_data.password)
+        user.pending_password = None  # 审批完成，清除明文密码
     db.commit()
     db.refresh(user)
 

@@ -1,13 +1,35 @@
+import { useState, useRef, useEffect } from 'react'
 import { Outlet, Link, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../stores/auth'
+import ChangePasswordModal from './ChangePasswordModal'
 
 export default function Layout() {
   const { user, logout } = useAuthStore()
   const navigate = useNavigate()
 
+  const [showUserMenu, setShowUserMenu] = useState(false)
+  const [showChangePwd, setShowChangePwd] = useState(false)
+  const menuRef = useRef(null)
+
+  useEffect(() => {
+    function onClickOutside(e) {
+      if (menuRef.current && !menuRef.current.contains(e.target)) {
+        setShowUserMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', onClickOutside)
+    return () => document.removeEventListener('mousedown', onClickOutside)
+  }, [])
+
   const handleLogout = () => {
+    setShowUserMenu(false)
     logout()
     navigate('/login')
+  }
+
+  const handleChangePwd = () => {
+    setShowUserMenu(false)
+    setShowChangePwd(true)
   }
 
   const roleLabel = {
@@ -65,17 +87,53 @@ export default function Layout() {
             </Link>
           )}
         </nav>
-        <div className="p-4 border-t border-gray-700">
-          <button onClick={handleLogout} className="w-full px-4 py-2 text-left rounded hover:bg-gray-700 transition text-red-400">
-            退出登录
-          </button>
-        </div>
       </aside>
 
-      {/* 主内容 */}
-      <main className="flex-1 p-6 overflow-auto">
-        <Outlet />
-      </main>
+      {/* 主内容 + 顶栏 */}
+      <div className="flex-1 flex flex-col">
+        {/* 顶栏:右上角用户菜单 */}
+        <header className="bg-white border-b border-gray-200 px-6 py-3 flex justify-end items-center">
+          <div className="relative" ref={menuRef}>
+            <button
+              onClick={() => setShowUserMenu(!showUserMenu)}
+              className="flex items-center gap-2 px-3 py-1.5 rounded hover:bg-gray-100 transition"
+            >
+              <span className="text-sm text-gray-700">
+                <span className="font-medium">{user?.real_name}</span>
+                <span className="text-gray-500 ml-1">({roleLabel[user?.role] || ''})</span>
+              </span>
+              <span className="text-gray-400 text-xs">▼</span>
+            </button>
+            {showUserMenu && (
+              <div className="absolute right-0 mt-2 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-50 overflow-hidden">
+                <button
+                  onClick={handleChangePwd}
+                  className="w-full px-4 py-2.5 text-left text-sm hover:bg-gray-50 transition flex items-center gap-2"
+                >
+                  <span>🔑</span>
+                  <span>修改密码</span>
+                </button>
+                <div className="border-t border-gray-100"></div>
+                <button
+                  onClick={handleLogout}
+                  className="w-full px-4 py-2.5 text-left text-sm hover:bg-red-50 text-red-600 transition flex items-center gap-2"
+                >
+                  <span>🚪</span>
+                  <span>退出登录</span>
+                </button>
+              </div>
+            )}
+          </div>
+        </header>
+        <main className="flex-1 p-6 overflow-auto bg-gray-50">
+          <Outlet />
+        </main>
+      </div>
+
+      {/* 修改密码弹窗 */}
+      {showChangePwd && (
+        <ChangePasswordModal onClose={() => setShowChangePwd(false)} />
+      )}
     </div>
   )
 }

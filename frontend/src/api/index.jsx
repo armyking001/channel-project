@@ -30,6 +30,7 @@ api.interceptors.response.use(
 export const login = (data) => api.post('/auth/login', data)
 export const getMe = () => api.get('/auth/me')
 export const applyAccount = (real_name) => api.post('/auth/apply-account', { real_name })
+export const changePassword = (data) => api.post('/auth/change-password', data)
 
 // 用户管理
 export const getUsers = (include_inactive = false) => api.get('/users', { params: { include_inactive } })
@@ -49,6 +50,7 @@ export const deleteProject = (id) => api.delete(`/projects/${id}`)
 export const submitProject = (id) => api.post(`/projects/${id}/submit`)
 export const approveProject = (id, data) => api.post(`/projects/${id}/approve`, data)
 export const rejectProject = (id, data) => api.post(`/projects/${id}/reject`, data)
+export const withdrawProject = (id) => api.post(`/projects/${id}/withdraw`)
 export const getApprovalLogs = (id) => api.get(`/projects/${id}/logs`)
 
 // 审批管理

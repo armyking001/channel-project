@@ -61,8 +61,10 @@ class ApprovalStatus(str, enum.Enum):
     rejected = "rejected"
 
 class ApprovalAction(str, enum.Enum):
+    submit = "submit"
     approve = "approve"
     reject = "reject"
+    withdraw = "withdraw"
 
 class User(Base):
     __tablename__ = "users"
@@ -75,6 +77,7 @@ class User(Base):
     parent_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     is_active = Column(Boolean, default=True)
     is_rejected = Column(Boolean, default=False)  # True = 申请被驳回（区别于 is_active=False 的"正常停用"）
+    pending_password = Column(String(50), nullable=True)  # 申请时生成的初始明文密码（审批通过或驳回后清除）
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -160,11 +163,13 @@ class AuditAction(str, enum.Enum):
     user_update = "user.update"              # 编辑用户
     user_delete = "user.delete"              # 停用用户
     user_reset_password = "user.reset_password"  # 重置密码
+    user_password_change = "user.password_change"  # 用户自己修改密码
     # 项目
     project_create = "project.create"
     project_update = "project.update"
     project_delete = "project.delete"
     project_submit = "project.submit"
+    project_withdraw = "project.withdraw"
     project_approve = "project.approve"
     project_reject = "project.reject"
     # 文件

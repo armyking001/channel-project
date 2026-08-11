@@ -56,6 +56,24 @@ async def lifespan(app: FastAPI):
             c.close()
     except Exception as e:
         print(f"[warn] 迁移 is_rejected 失败: {e}")
+    # 兼容旧库：手动加 pending_password 列
+    try:
+        import sqlite3 as _sqlite3
+        from app.database import load_config
+        cfg = load_config()
+        path = cfg["database"]["url"].replace("sqlite:///", "", 1)
+        if path.startswith("/") and len(path) > 2 and path[2] == ":":
+            path = path[1:]
+        c = _sqlite3.connect(path, timeout=10)
+        try:
+            cols = [r[1] for r in c.execute("PRAGMA table_info(users)").fetchall()]
+            if 'pending_password' not in cols:
+                c.execute("ALTER TABLE users ADD COLUMN pending_password VARCHAR(50)")
+                print('[migrate] users.pending_password 列已添加')
+        finally:
+            c.close()
+    except Exception as e:
+        print(f"[warn] 迁移 pending_password 失败: {e}")
     # 创建默认管理员
     from app.database import SessionLocal
     from app.models import User, UserRole

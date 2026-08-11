@@ -72,7 +72,7 @@ export default function UserManagement() {
   // 审批弹窗状态
   const [showApprove, setShowApprove] = useState(false)
   const [approveTarget, setApproveTarget] = useState(null)
-  const [approveForm, setApproveForm] = useState({ pwd1: '', pwd2: '', role: 'normal', parent_id: '' })
+  const [approveForm, setApproveForm] = useState({ pwd1: '', pwd2: '', role: 'normal', parent_id: '', username: '' })
 
   // 批量审批
   const [selectedIds, setSelectedIds] = useState(new Set())
@@ -165,11 +165,25 @@ export default function UserManagement() {
   // 打开审批弹窗
   const openApprove = (u) => {
     setApproveTarget(u)
+    console.log('[openApprove] 用户数据:', u)  // 调试日志
+    console.log('[openApprove] pending_password:', u?.pending_password)  // 调试日志
+    // 如果申请时已生成初始密码,自动填入(管理员可改可不改)
+    // 兼容旧数据:如果 pending_password 为空(老用户),生成 8 位随机密码
+    let initialPwd = u.pending_password || ''
+    if (!initialPwd && (u.username || '').startsWith('!PENDING_')) {
+      // 生成 8 位随机密码(大小写字母+数字)
+      const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'
+      initialPwd = Array.from({ length: 8 }, () =>
+        alphabet[Math.floor(Math.random() * alphabet.length)]
+      ).join('')
+    }
+    console.log('[openApprove] 最终填入密码:', initialPwd)  // 调试日志
     setApproveForm({
-      pwd1: '',
-      pwd2: '',
+      pwd1: initialPwd,
+      pwd2: initialPwd,
       role: 'normal',
       parent_id: '',
+      username: (u.username || '').replace(/^!PENDING_/, ''),
     })
     setShowApprove(true)
   }
@@ -177,12 +191,12 @@ export default function UserManagement() {
   const closeApprove = () => {
     setShowApprove(false)
     setApproveTarget(null)
-    setApproveForm({ pwd1: '', pwd2: '', role: 'normal', parent_id: '' })
+    setApproveForm({ pwd1: '', pwd2: '', role: 'normal', parent_id: '', username: '' })
   }
 
   // 提交审批：先设密码 + 改角色/上级，再激活
   const handleApproveSubmit = async () => {
-    const { pwd1, pwd2, role, parent_id } = approveForm
+    const { pwd1, pwd2, role, parent_id, username } = approveForm
     if (!pwd1 || pwd1.length < 6) {
       alert('请输入至少 6 位的初始密码')
       return
@@ -191,9 +205,13 @@ export default function UserManagement() {
       alert('两次输入的密码不一致')
       return
     }
+    const cleanUsername = (username || '').trim() || (approveTarget.username || '').replace(/^!PENDING_/, '')
+    if (!cleanUsername) {
+      alert('账号名不能为空')
+      return
+    }
     try {
-      // 1) 改角色/上级 + 去掉 PENDING 前缀 + 激活
-      const cleanUsername = (approveTarget.username || '').replace(/^!PENDING_/, '')
+      // 1) 改账号名 + 角色/上级 + 去掉 PENDING 前缀 + 激活
       await updateUser(approveTarget.id, {
         username: cleanUsername,
         role,
@@ -511,7 +529,7 @@ export default function UserManagement() {
                   <td className="px-4 py-3">
                     <StatusBadge user={u} />
                   </td>
-                  <td className="px-4 py-3 text-gray-500">{new Date(u.created_at).toLocaleDateString()}</td>
+                  <td className="px-4 py-3 text-gray-500">{new Date(u.created_at).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' })}</td>
                   {isAdmin && (
                     <td className="px-4 py-3 text-center whitespace-nowrap">
                       {isPending ? (
@@ -604,9 +622,19 @@ export default function UserManagement() {
           <div className="bg-white rounded-lg p-6 w-[460px]">
             <h3 className="text-lg font-bold mb-1">审批账号</h3>
             <p className="text-sm text-gray-500 mb-4">
-              申请人：<strong>{approveTarget.real_name}</strong>　账号：<strong className="text-orange-600 font-mono">{approveTarget.username.replace('!PENDING_', '')}</strong>
+              申请人：<strong>{approveTarget.real_name}</strong>
             </p>
             <div className="space-y-3">
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">账号名<span className="text-red-500 ml-1">*</span>
+                  <span className="text-xs text-gray-400 ml-1">（默认系统生成，可手动修改）</span>
+                </label>
+                <input value={approveForm.username}
+                  onChange={e => setApproveForm(f => ({ ...f, username: e.target.value }))}
+                  className="w-full border rounded px-3 py-2 font-mono"
+                  placeholder="例如：sjren"
+                />
+              </div>
               <div>
                 <label className="block text-sm text-gray-600 mb-1">分配角色<span className="text-red-500 ml-1">*</span></label>
                 <select value={approveForm.role} onChange={e => setApproveForm(f => ({ ...f, role: e.target.value }))}

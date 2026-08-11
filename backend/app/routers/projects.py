@@ -202,12 +202,10 @@ def update_project(
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
-    # 权限：普通账号只能编辑自己的草稿
+    # 权限：普通账号可以编辑任何项目（用于上传文件），但不能编辑"已通过"的项目
     if current_user.role == UserRole.normal:
-        if project.created_by != current_user.id:
-            raise HTTPException(status_code=403, detail="无权编辑此项目")
-        if project.approval_status not in [ApprovalStatus.pending_submit.value, ApprovalStatus.rejected.value]:
-            raise HTTPException(status_code=400, detail="已提交或审批中的项目不可编辑")
+        if project.approval_status == ApprovalStatus.approved.value:
+            raise HTTPException(status_code=400, detail="已通过的项目不可编辑")
     
     # 管理员权限控制：
     # 1. admin 可以修改 win_bid_status 字段
@@ -340,6 +338,13 @@ def submit_project(
     if not project.approver_id:
         raise HTTPException(status_code=400, detail="请先指定审批人")
     project.approval_status = ApprovalStatus.pending_approval
+    log = ApprovalLog(
+        project_id=project_id,
+        approver_id=current_user.id,
+        action=ApprovalAction.submit,
+        comment='创建者提交审批',
+    )
+    db.add(log)
     db.commit()
     db.refresh(project)
     write_audit(
@@ -415,6 +420,48 @@ def reject_project(
         details={'comment': data.comment}, request=request,
     )
     return project
+
+@router.post("/{project_id}/withdraw", response_model=ProjectResponse)
+def withdraw_project(
+    project_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    撤回项目：创建者把项目从"待审批"或"已驳回"撤回到"待提交"状态。
+    - 仅项目创建者可撤回
+    - 仅在 pending_approval / rejected 状态下可撤回（pending_submit 无需撤回）
+    - 不删除 NAS 上已存在的项目目录和文件
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    # 仅创建者可撤回
+    if project.created_by != current_user.id:
+        raise HTTPException(status_code=403, detail="只有项目创建者可以撤回")
+    # 仅在待审批/已驳回状态可撤回
+    withdrawable_states = [ApprovalStatus.pending_approval.value, ApprovalStatus.rejected.value]
+    if project.approval_status not in withdrawable_states:
+        raise HTTPException(status_code=400, detail=f"当前状态({project.approval_status})不支持撤回")
+    previous_status = project.approval_status
+    project.approval_status = ApprovalStatus.pending_submit
+    log = ApprovalLog(
+        project_id=project_id,
+        approver_id=current_user.id,
+        action=ApprovalAction.withdraw,
+        comment=f"创建者撤回（之前状态: {previous_status}）"
+    )
+    db.add(log)
+    db.commit()
+    db.refresh(project)
+    write_audit(
+        current_user, AuditAction.project_withdraw,
+        target_type='project', target_id=project.id, target_name=project.project_name,
+        details={'previous_status': previous_status}, request=request,
+    )
+    return project
+
 
 @router.get("/{project_id}/logs", response_model=List[ApprovalLogResponse])
 def get_approval_logs(

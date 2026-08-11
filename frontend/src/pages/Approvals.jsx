@@ -2,6 +2,11 @@ import { useState, useEffect } from 'react'
 import { getApprovalPending, getApprovalHistory, getApprovalSummary, fastApprove, fastReject } from '../api'
 import { useAuthStore } from '../stores/auth'
 import dayjs from 'dayjs'
+import utc from 'dayjs/plugin/utc'
+import timezone from 'dayjs/plugin/timezone'
+
+dayjs.extend(utc)
+dayjs.extend(timezone)
 
 const TABS = [
   { key: 'pending', label: '待我审批' },
@@ -145,7 +150,7 @@ export default function Approvals() {
               <th className="px-3 py-2 text-center">状态</th>
               <th className="px-3 py-2 text-left">创建人</th>
               <th className="px-3 py-2 text-left">审批人</th>
-              <th className="px-3 py-2 text-left">更新时间</th>
+              <th className="px-3 py-2 text-left">填报时间</th>
               {tab === 'pending' && canApprove && (
                 <th className="px-3 py-2 text-center">操作</th>
               )}
@@ -170,7 +175,7 @@ export default function Approvals() {
                   </td>
                   <td className="px-3 py-2">{p.creator?.real_name || '-'}</td>
                   <td className="px-3 py-2">{p.approver?.real_name || '-'}</td>
-                  <td className="px-3 py-2 text-xs text-gray-500">{p.updated_at ? dayjs(p.updated_at).format('YYYY-MM-DD HH:mm') : '-'}</td>
+                  <td className="px-3 py-2 text-xs text-gray-500">{p.created_at ? dayjs.utc(p.created_at).tz('Asia/Shanghai').format('YYYY-MM-DD HH:mm') : '-'}</td>
                   {tab === 'pending' && canApprove && (
                     <td className="px-3 py-2 text-center">
                       <div className="flex justify-center gap-2">

@@ -39,10 +39,10 @@ function stripUrlPrefix(url) {
   return url.replace(/^https?:\/\/[^/]+\/+/, '')
 }
 
-export default function ProjectForm({ project, onClose, onSaved, readOnly = false }) {
+export default function ProjectForm({ project, onClose, onSaved, onDelete, readOnly = false, withdrawMode = false }) {
   const { user: currentUser } = useAuthStore()
   const isEdit = !!project
-  const isAdmin = currentUser?.role === 'admin' || currentUser?.role === 'important_admin'
+  const isAdmin = currentUser?.role === 'admin'
   const fileTenderRef = useRef(null)
   const fileBidRef = useRef(null)
 
@@ -462,18 +462,20 @@ export default function ProjectForm({ project, onClose, onSaved, readOnly = fals
       {/* 顶部标题栏 */}
       <div className="flex items-center justify-between px-8 py-5 border-b bg-gradient-to-r from-blue-50 to-white">
         <h3 className="text-xl font-bold text-gray-800">
-          {readOnly ? '查看项目详情' : 
-            (isEdit ? (isAdmin ? '编辑项目（管理员模式）' : '编辑项目（仅上传文件）') : '新建项目')}
+          {readOnly ? '查看项目详情' :
+            (withdrawMode ? '撤回修改' :
+              (isEdit ? (isAdmin ? '编辑项目（管理员模式）' : '编辑项目（仅上传文件）') : '新建项目'))}
         </h3>
         {(isEdit || readOnly) && (
           <span className="text-xs px-2 py-1 rounded border"
             style={{
-              color: readOnly ? '#6b7280' : (isAdmin ? '#059669' : '#d97706'),
-              background: readOnly ? '#f3f4f6' : (isAdmin ? '#ecfdf5' : '#fffbeb'),
-              borderColor: readOnly ? '#d1d5db' : (isAdmin ? '#a7f3d0' : '#fde68a')
+              color: readOnly ? '#6b7280' : (withdrawMode ? '#7c3aed' : (isAdmin ? '#059669' : '#d97706')),
+              background: readOnly ? '#f3f4f6' : (withdrawMode ? '#f5f3ff' : (isAdmin ? '#ecfdf5' : '#fffbeb')),
+              borderColor: readOnly ? '#d1d5db' : (withdrawMode ? '#ddd6fe' : (isAdmin ? '#a7f3d0' : '#fde68a'))
             }}>
-            {readOnly ? '📖 只读查看模式' : 
-              (isAdmin ? '🛡️ 管理员权限：可修改中标状态及上传文件' : '🔒 项目已建，字段锁定，仅可上传/查看文件')}
+            {readOnly ? '📖 只读查看模式' :
+              (withdrawMode ? '🔄 项目已撤回，可修改除项目名称外的所有字段' :
+                (isAdmin ? '🛡️ 管理员权限：可修改中标状态及上传文件' : '🔒 项目已建，字段锁定，仅可上传/查看文件'))}
           </span>
         )}
         <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">×</button>
@@ -628,21 +630,30 @@ export default function ProjectForm({ project, onClose, onSaved, readOnly = fals
           </>
         )}
 
-        {/* 新建模式表单 */}
-        {!isEdit && !readOnly && (
+        {/* 新建模式/撤回修改 模式表单 */}
+        {!readOnly && (!isEdit || withdrawMode) && (
           <>
             {/* 区域 1: 项目基本信息 */}
             <div className="mb-5">
-              <div className="bg-green-50 border-l-4 border-green-500 px-3 py-1.5 mb-3">
-                <span className="text-sm font-bold text-green-700">项目基本信息</span>
+              <div className={`${withdrawMode ? 'bg-purple-50 border-purple-500' : 'bg-green-50 border-green-500'} border-l-4 px-3 py-1.5 mb-3`}>
+                <span className={`text-sm font-bold ${withdrawMode ? 'text-purple-700' : 'text-green-700'}`}>项目基本信息</span>
               </div>
               <div className="grid grid-cols-2 gap-x-8 gap-y-3">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">项目名称<Star /></label>
-                  <input type="text" value={form.project_name}
-                    onChange={e => setForm(f => ({ ...f, project_name: e.target.value }))}
-                    placeholder="请输入项目名称"
-                    className={errors.project_name ? inputErrCls : inputCls} />
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    项目名称<Star />
+                    {withdrawMode && <span className="ml-2 text-xs text-gray-400">（撤回后不可修改）</span>}
+                  </label>
+                  {withdrawMode ? (
+                    <div className="px-3 py-2 bg-gray-100 border border-gray-200 rounded text-gray-700 cursor-not-allowed">
+                      {form.project_name}
+                    </div>
+                  ) : (
+                    <input type="text" value={form.project_name}
+                      onChange={e => setForm(f => ({ ...f, project_name: e.target.value }))}
+                      placeholder="请输入项目名称"
+                      className={errors.project_name ? inputErrCls : inputCls} />
+                  )}
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">项目编号</label>
@@ -821,11 +832,11 @@ export default function ProjectForm({ project, onClose, onSaved, readOnly = fals
           </div>
         </div>
 
-        {/* 区域 5: 审批人（仅新建） */}
-        {!isEdit && (
+        {/* 区域 5: 审批人（新建/撤回修改） */}
+        {(!isEdit || withdrawMode) && (
           <div className="mb-5">
-            <div className="bg-green-50 border-l-4 border-green-500 px-3 py-1.5 mb-3">
-              <span className="text-sm font-bold text-green-700">审批人<Star /></span>
+            <div className={`${withdrawMode ? 'bg-purple-50 border-purple-500' : 'bg-green-50 border-green-500'} border-l-4 px-3 py-1.5 mb-3`}>
+              <span className={`text-sm font-bold ${withdrawMode ? 'text-purple-700' : 'text-green-700'}`}>审批人<Star /></span>
             </div>
             <div>
               <select value={form.approver_id}
@@ -834,7 +845,7 @@ export default function ProjectForm({ project, onClose, onSaved, readOnly = fals
                 <option value="">请选择审批人</option>
                 {users.map(u => (
                   <option key={u.id} value={u.id}>
-                    {u.real_name} ({u.username}) - {u.role === 'admin' ? '系统管理员' : u.role === 'important_admin' ? '重要管理员' : u.role === 'important' ? '重要账号' : '普通账号'}
+                    {u.real_name} ({u.username}) - {u.role === 'admin' ? '系统管理员' : u.role === 'important' ? '重要账号' : u.role === 'archive' ? '档案管理' : '普通账号'}
                   </option>
                 ))}
               </select>
@@ -843,22 +854,42 @@ export default function ProjectForm({ project, onClose, onSaved, readOnly = fals
         )}
 
         {/* 底部按钮 */}
-        <div className="flex justify-end gap-3 pt-5 border-t mt-6">
-          <button type="button" onClick={onClose}
-            className="px-6 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50 transition">
-            {readOnly ? '关闭' : (isEdit ? '关闭' : '取消')}
-          </button>
-          {!readOnly && (isEdit ? (
+        <div className="flex justify-between gap-3 pt-5 border-t mt-6">
+          {/* 左侧：撤回模式下显示删除项目按钮 */}
+          {!readOnly && withdrawMode && onDelete && (
+            <button type="button" onClick={async () => {
+              if (!confirm('确定删除此项目吗？\n注：NAS 上的项目目录和文件不会被删除。')) return
+              try {
+                await onDelete()
+              } catch (err) {
+                alert('删除失败：' + (err?.message || '未知错误'))
+              }
+            }} className="px-6 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 transition shadow-sm">
+              删除项目
+            </button>
+          )}
+          <div className="flex gap-3 ml-auto">
             <button type="button" onClick={onClose}
-              className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition shadow-sm">
-              完成
+              className="px-6 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50 transition">
+              {readOnly ? '关闭' : (withdrawMode ? '取消' : (isEdit ? '关闭' : '取消'))}
             </button>
-          ) : (
-            <button type="submit"
-              className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition shadow-sm">
-              保存
-            </button>
-          ))}
+            {!readOnly && (withdrawMode ? (
+              <button type="submit"
+                className="px-6 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 transition shadow-sm">
+                继续编辑（保存修改）
+              </button>
+            ) : isEdit ? (
+              <button type="button" onClick={onClose}
+                className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition shadow-sm">
+                完成
+              </button>
+            ) : (
+              <button type="submit"
+                className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition shadow-sm">
+                保存
+              </button>
+            ))}
+          </div>
         </div>
       </form>
 
