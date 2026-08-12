@@ -146,7 +146,10 @@ def create_project(
     bid_folder = None
     if storage_cfg:
         try:
-            folders = create_project_folders(db, storage_cfg, current_user.username, current_user.real_name, data.project_name)
+            folders = create_project_folders(
+                db, storage_cfg, current_user.username, current_user.real_name, data.project_name,
+                responsible_sales=getattr(data, 'responsible_sales', None)
+            )
             tender_folder = folders['tender_folder']
             bid_folder = folders['bid_folder']
             log.warning(f"[create_project] folders ok: tender={tender_folder} bid={bid_folder}")

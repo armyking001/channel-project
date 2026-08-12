@@ -28,7 +28,7 @@ class FileStorageConfig(Base):
     webdav_username = Column(String(100), nullable=True)
     webdav_password = Column(String(200), nullable=True)
     webdav_base_path = Column(String(500), nullable=True)
-    template = Column(String(200), default='{real_name}+{project_name}+{date}', nullable=False)
+    template = Column(String(200), default='{responsible_sales}+{project_name}+{date}', nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 class UserRole(str, enum.Enum):
@@ -128,6 +128,7 @@ class Project(Base):
     bid_file = Column(String(500), nullable=True)
     tender_folder = Column(String(500), nullable=True)
     bid_folder = Column(String(500), nullable=True)
+    responsible_sales = Column(String(100), nullable=True)  # 责任销售（用于命名项目文件夹，留空则用创建者姓名）
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     approver_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     approval_status = Column(Enum(ApprovalStatus), default=ApprovalStatus.pending_submit)

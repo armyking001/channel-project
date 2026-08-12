@@ -74,6 +74,42 @@ async def lifespan(app: FastAPI):
             c.close()
     except Exception as e:
         print(f"[warn] 迁移 pending_password 失败: {e}")
+    # 兼容旧库：手动加 responsible_sales 列
+    try:
+        import sqlite3 as _sqlite3
+        from app.database import load_config
+        cfg = load_config()
+        path = cfg["database"]["url"].replace("sqlite:///", "", 1)
+        if path.startswith("/") and len(path) > 2 and path[2] == ":":
+            path = path[1:]
+        c = _sqlite3.connect(path, timeout=10)
+        try:
+            cols = [r[1] for r in c.execute("PRAGMA table_info(projects)").fetchall()]
+            if 'responsible_sales' not in cols:
+                c.execute("ALTER TABLE projects ADD COLUMN responsible_sales VARCHAR(100)")
+                print('[migrate] projects.responsible_sales 列已添加')
+        finally:
+            c.close()
+    except Exception as e:
+        print(f"[warn] 迁移 responsible_sales 失败: {e}")
+    # 兼容旧库：把 file_storage_config.template 从 {real_name} 升级到 {responsible_sales}
+    try:
+        import sqlite3 as _sqlite3
+        from app.database import load_config
+        cfg = load_config()
+        path = cfg["database"]["url"].replace("sqlite:///", "", 1)
+        if path.startswith("/") and len(path) > 2 and path[2] == ":":
+            path = path[1:]
+        c = _sqlite3.connect(path, timeout=10)
+        try:
+            c.execute("UPDATE file_storage_config SET template='{responsible_sales}+{project_name}+{date}' WHERE template='{real_name}+{project_name}+{date}'")
+            if c.rowcount > 0:
+                print('[migrate] file_storage_config.template 已从 {real_name} 升级为 {responsible_sales}')
+            c.commit()
+        finally:
+            c.close()
+    except Exception as e:
+        print(f"[warn] 迁移 template 失败: {e}")
     # 创建默认管理员
     from app.database import SessionLocal
     from app.models import User, UserRole

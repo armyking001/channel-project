@@ -65,6 +65,15 @@
 - **真因**：`onDelete={handleDelete}` 直接传函数引用，调用时 `handleDelete()` 没传 id → `DELETE /api/projects/undefined` → 404
 - **教训**：父组件传回调给子组件时，**必须**用 `() => handler(args)` 绑定参数，不要直接传函数引用
 
+### 坑 7：DB template 字段不会自动跟随代码默认值更新
+- **症状**：前端传 `responsible_sales='测试人A'` → 预览路径仍是 `刘建辉+...`（创建者姓名）
+- **真因**：`FileStorageConfig.template` 是数据库**配置项**，不是代码常量。即使代码 `default='{responsible_sales}+...'` 已改，**已存在的数据库行不会自动更新**。模板里**没有 `{responsible_sales}` 占位符** → 永远只渲染 `{real_name}`。
+- **教训**：
+  - 涉及模板字符串拼接的"业务配置项"都要**双重保障**：① 代码默认值更新；② 启动时**显式迁移 UPDATE** 数据库。
+  - **不要相信"render 函数接受了 responsible_sales 参数就以为会用上"**——模板字符串才是真相。
+  - 部署完必须 `SELECT template FROM file_storage_config;` 验证。
+- **涉及文件**：`backend/app/main.py`（UPDATE脚本）+ `backend/app/models.py`（默认值）
+
 ## 🎯 当前功能模块状态
 
 | 模块 | 状态 | 备注 |
@@ -141,6 +150,55 @@ print(r.json())
 ## 📜 变更日志（Chronological Changelog）
 
 按时间倒序记录「用户提的需求」与「已实施的改动」，方便后续 AI 助手快速理解近期上下文。
+
+---
+
+### 🗓 2026-08-12（责任销售字段 + 文件夹命名模板升级）
+
+#### ① Project 增加「责任销售」字段（必填）✅
+- **需求**：项目基本信息加"责任销售"字段（必填），用于命名项目目录。
+- **实现**：
+  - `backend/app/models.py:Project`：新增 `responsible_sales: Optional[str] = NULL`，迁移脚本 `ALTER TABLE projects ADD COLUMN responsible_sales VARCHAR(100)`。
+  - `backend/app/schemas.py`：
+    - `ProjectBase` 加 `responsible_sales` 字段。
+    - `ProjectCreate.responsible_sales: str = Field(..., min_length=1)` 强制必填。
+    - `ProjectUpdate` 和 `ProjectResponse` 加 `responsible_sales`。
+  - `frontend/src/components/ProjectForm.jsx`：
+    - 表单 state 加 `responsible_sales`。
+    - 输入框标签加红星 `<Star />`（必填）。
+    - `validate()` 加 `errs.responsible_sales = '责任销售必填'`。
+    - 提交时 `responsible_sales: form.responsible_sales?.trim() || ''`。
+- **关联文件**：
+  - `backend/app/models.py:Project.responsible_sales`
+  - `backend/app/main.py`（ALTER TABLE 迁移）
+  - `backend/app/schemas.py:ProjectCreate.responsible_sales`
+  - `frontend/src/components/ProjectForm.jsx`
+
+#### ② 文件夹命名模板升级：`{real_name}` → `{responsible_sales}` ✅
+- **需求**：生成的目录名从"姓名+项目名称+建立时间"改为"责任销售+项目名称+建立时间"。
+- **实现**：
+  - `backend/app/models.py:FileStorageConfig.template`：默认值从 `'{real_name}+{project_name}+{date}'` 改为 `'{responsible_sales}+{project_name}+{date}'`。
+  - `backend/app/services/file_storage.py:render_base_folder`：模板默认 `'{responsible_sales}+...'`；`responsible_sales` 为空时**兜底**用 `real_name`（兼容老数据）。
+  - `backend/app/routers/file_storage.py:preview_path`：传入 `responsible_sales`；**移除 `existing_tender_folder/existing_bid_folder` 兜底逻辑**（保证预览实时跟随字段变化）。
+  - `backend/app/main.py`：迁移脚本增加 `UPDATE file_storage_config SET template='...' WHERE template='{real_name}+...'`。
+  - `backend/app/schemas.py:PathPreviewRequest`：新增 `responsible_sales: Optional[str] = None`。
+  - `frontend/src/components/ProjectForm.jsx`：预览逻辑增加必填校验——只有 `project_name + responsible_sales` 都填了才调 API，否则显示"请先填写项目名称和责任销售"占位符。`useEffect` 依赖增加 `form.responsible_sales`。
+- **关联文件**：
+  - `backend/app/models.py:FileStorageConfig.template` 默认值
+  - `backend/app/services/file_storage.py:render_base_folder`
+  - `backend/app/routers/file_storage.py:preview_path`
+  - `backend/app/main.py`（template 迁移）
+  - `backend/app/schemas.py:PathPreviewRequest.responsible_sales`
+  - `frontend/src/components/ProjectForm.jsx`（预览逻辑 + useEffect 依赖）
+
+#### ③ 坑：DB template 字段不会自动更新（关键）⚠️
+- **症状**：前端传 `responsible_sales='测试人A'` → 预览路径仍是 `刘建辉+项目名称+...`（创建者姓名）。
+- **真因**：后端 `FileStorageConfig.template` 是数据库**配置项**，不是代码常量。即使代码默认改了，**已存在的数据库行不会自动更新**。模板里**没有 `{responsible_sales}` 占位符** → 永远只渲染 `{real_name}`。
+- **教训**：
+  - 凡是涉及模板字符串拼接的"业务配置项"都要**双重保障**：① 代码默认值更新；② 启动时**显式迁移 UPDATE** 数据库。
+  - **不要相信 "render 函数接受了 responsible_sales 参数就以为会用上"**——模板才是真相。
+- **排查方法**：直接查 DB `SELECT template FROM file_storage_config;`。
+- **解决**：手动 UPDATE 服务器 DB 一次；后续重启自动 UPDATE。
 
 ---
 

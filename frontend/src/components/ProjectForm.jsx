@@ -56,6 +56,7 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
     project_name: initial('project_name'),
     project_code: initial('project_code'),
     project_type: initial('project_type', '其他'),
+    responsible_sales: initial('responsible_sales'),
     expected_amount: isEdit ? ((project.expected_amount ?? 0)).toString() : '',
     tender_time: initial('tender_time'),
     bid_time: initial('bid_time'),
@@ -148,11 +149,23 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
         creator_username: p?.username,
         creator_real_name: p?.real_name,
       }
+      // 必填校验：只有项目名称 + 责任销售 都填了才预览文件夹路径
+      // 否则只显示"待填写"占位符（避免用 real_name 兑底导致误导）
+      const hasName = !!(form.project_name && form.project_name.trim())
+      const hasSales = !!(form.responsible_sales && form.responsible_sales.trim())
+      if (!hasName || !hasSales) {
+        if (isSubscribed) {
+          const placeholder = '请先填写项目名称和责任销售'
+          setTenderPreview(placeholder)
+          setBidPreview(placeholder)
+        }
+        return
+      }
       try {
         // 1. 获取预览路径
         const [resTender, resBid] = await Promise.all([
-          previewFileStoragePath({ project_name: form.project_name, folder_type: 'tender', ...creatorPayload }).catch(() => ({})),
-          previewFileStoragePath({ project_name: form.project_name, folder_type: 'bid', ...creatorPayload }).catch(() => ({})),
+          previewFileStoragePath({ project_name: form.project_name, folder_type: 'tender', responsible_sales: form.responsible_sales, ...creatorPayload }).catch(() => ({})),
+          previewFileStoragePath({ project_name: form.project_name, folder_type: 'bid', responsible_sales: form.responsible_sales, ...creatorPayload }).catch(() => ({})),
         ])
         if (isSubscribed) {
           setTenderPreview((resTender?.data ?? resTender)?.tender_folder || (resTender?.data ?? resTender)?.path || '')
@@ -173,7 +186,7 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
       clearTimeout(t)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.project_name, project?.id, project?.tender_folder, project?.bid_folder])
+  }, [form.project_name, form.responsible_sales, project?.id, project?.tender_folder, project?.bid_folder])
 
   const [users, setUsers] = useState([])
   useEffect(() => {
@@ -188,6 +201,7 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
   const validate = () => {
     const errs = {}
     if (!form.project_name?.trim()) errs.project_name = '项目名称必填'
+    if (!form.responsible_sales?.trim()) errs.responsible_sales = '责任销售必填'
     if (!form.project_type) errs.project_type = '项目类型必填'
     if (form.expected_amount === '' || form.expected_amount === null || form.expected_amount === undefined) {
       errs.expected_amount = '预计金额必填'
@@ -214,6 +228,7 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
       ...form,
       project_name: form.project_name.trim(),
       project_type: form.project_type,
+      responsible_sales: form.responsible_sales?.trim() || '',
       project_code: form.project_code?.trim() || '',
       partner_company: form.partner_company?.trim() || '',
       owner_contact_person: form.owner_contact_person?.trim() || '',
@@ -534,6 +549,10 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
                   <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.project_name || '-'}</div>
                 </div>
                 <div>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">责任销售</label>
+                  <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.responsible_sales || '（未指定，使用创建者姓名）'}</div>
+                </div>
+                <div>
                   <label className="block text-sm font-medium text-gray-500 mb-1">项目编号</label>
                   <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.project_code || '-'}</div>
                 </div>
@@ -654,6 +673,16 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
                       placeholder="请输入项目名称"
                       className={errors.project_name ? inputErrCls : inputCls} />
                   )}
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    责任销售<Star />
+                    {withdrawMode && <span className="ml-2 text-xs text-gray-400">（撤回后可修改）</span>}
+                  </label>
+                  <input type="text" value={form.responsible_sales || ''}
+                    onChange={e => setForm(f => ({ ...f, responsible_sales: e.target.value }))}
+                    placeholder="请输入责任销售姓名（用于文件夹命名）"
+                    className={errors.responsible_sales ? inputErrCls : inputCls} />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">项目编号</label>

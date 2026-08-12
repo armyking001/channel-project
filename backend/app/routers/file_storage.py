@@ -188,14 +188,10 @@ def preview_path(
                     real_name = owner.real_name
         except Exception:
             pass
-    root = render_project_root(cfg, username, real_name, data.project_name)
+    root = render_project_root(cfg, username, real_name, data.project_name, data.responsible_sales)
     tender = render_subfolder(root, '招标资料')
     bid = render_subfolder(root, '投标文档')
-    # 编辑已有项目：优先用数据库里已存的目录（避免模板/创建者变化后路径错位）
-    if data.existing_tender_folder:
-        tender = data.existing_tender_folder
-    if data.existing_bid_folder:
-        bid = data.existing_bid_folder
+    # 注意：不再回退到 existing_*_folder 旧值——保证责任销售等字段变动时预览实时跟随
     return PathPreviewResponse(
         base_folder=root,
         tender_folder=tender,

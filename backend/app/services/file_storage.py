@@ -32,16 +32,21 @@ sanitize_path_segment = _sanitize
 # ----- 工具：模板渲染 -----
 def render_base_folder(config: FileStorageConfig, username: str, real_name: str,
                        project_name: str,
+                       responsible_sales: Optional[str] = None,
                        created_at: Optional[datetime.datetime] = None) -> str:
     """根据模板渲染项目根目录名（不含 mode 前缀）
-    默认模板: {real_name}+{project_name}+{date}  — 姓名+项目名称+项目建立日期
-    同时支持 {username} 和 {real_name} 变量
+    默认模板: {responsible_sales}+{project_name}+{date} — 责任销售+项目名称+项目建立日期
+    兼容老模板: {real_name}+{project_name}+{date} 仍可工作
+    留空兑底:负责销售为空时，兑底用创建者 real_name
     """
     created_at = created_at or datetime.datetime.now()
-    tpl = config.template or '{real_name}+{project_name}+{date}'
+    tpl = config.template or '{responsible_sales}+{project_name}+{date}'
+    # 兑底：负责销售为空 → 用创建者姓名
+    sales_name = responsible_sales.strip() if (responsible_sales and responsible_sales.strip()) else real_name
     return tpl.format(
         username=_sanitize(username),
         real_name=_sanitize(real_name),
+        responsible_sales=_sanitize(sales_name),
         project_name=_sanitize(project_name),
         date=created_at.strftime('%Y-%m-%d'),
     )
@@ -50,9 +55,10 @@ def render_base_folder(config: FileStorageConfig, username: str, real_name: str,
 # ----- 工具：根据 mode 返回完整路径（不含 tender/bid 子目录） -----
 def render_project_root(config: FileStorageConfig, username: str, real_name: str,
                         project_name: str,
+                        responsible_sales: Optional[str] = None,
                         created_at: Optional[datetime.datetime] = None) -> str:
     """返回完整根目录：local -> 绝对路径, webdav -> URL 字符串"""
-    folder = render_base_folder(config, username, real_name, project_name, created_at)
+    folder = render_base_folder(config, username, real_name, project_name, responsible_sales, created_at)
     if config.mode == StorageMode.local:
         base = (config.local_path or '').rstrip('\\/') or '.'
         return os.path.join(base, folder).replace('/', os.sep)
@@ -175,11 +181,13 @@ def ensure_webdav_folders(root_url: str, subfolders: list,
 
 # ----- 入口：根据配置建项目目录（统一接口） -----
 def create_project_folders(db: Session, config: FileStorageConfig,
-                           username: str, real_name: str, project_name: str) -> Dict[str, str]:
+                           username: str, real_name: str, project_name: str,
+                           responsible_sales: Optional[str] = None) -> Dict[str, str]:
     """根据配置自动建项目目录，返回 tender_folder / bid_folder 绝对路径
-    文件夹名 = 模板渲染结果（支持 {username} 和 {real_name}）
+    文件夹名 = 模板渲染结果（支持 {username} / {real_name} / {responsible_sales}）
+    负责销售为空时，使用创建者 real_name 兑底
     """
-    root = render_project_root(config, username, real_name, project_name)
+    root = render_project_root(config, username, real_name, project_name, responsible_sales)
     tender = render_subfolder(root, '招标资料')
     bid = render_subfolder(root, '投标文档')
 

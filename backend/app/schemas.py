@@ -85,8 +85,11 @@ class ProjectBase(BaseModel):
     tender_file: Optional[str] = None
     bid_file: Optional[str] = None
     approver_id: Optional[int] = None
+    responsible_sales: Optional[str] = None
 
 class ProjectCreate(ProjectBase):
+    responsible_sales: str = Field(..., min_length=1, max_length=100)  # 责任销售必填（用于文件夹命名）
+
     @field_validator('tender_time', 'bid_time', mode='before')
     @classmethod
     def _empty_date_to_none(cls, v):
@@ -120,6 +123,7 @@ class ProjectUpdate(BaseModel):
     tender_file: Optional[str] = None
     bid_file: Optional[str] = None
     approver_id: Optional[int] = None
+    responsible_sales: Optional[str] = None
 
     @field_validator('tender_time', 'bid_time', mode='before')
     @classmethod
@@ -160,6 +164,7 @@ class ProjectResponse(BaseModel):
     bid_file: Optional[str]
     tender_folder: Optional[str] = None
     bid_folder: Optional[str] = None
+    responsible_sales: Optional[str] = None
     created_by: int
     approver_id: Optional[int]
     approval_status: ApprovalStatus
@@ -230,6 +235,8 @@ class PathPreviewRequest(BaseModel):
     # 指定创建者（用于编辑模式下预览原始项目路径）
     creator_username: Optional[str] = None
     creator_real_name: Optional[str] = None
+    # 责任销售（用于命名项目根目录，留空则兑底用创建者姓名）
+    responsible_sales: Optional[str] = None
     # 已有项目目录直接回传（用数据库存的 tender_folder/bid_folder）
     existing_tender_folder: Optional[str] = None
     existing_bid_folder: Optional[str] = None
