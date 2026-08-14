@@ -153,6 +153,56 @@ print(r.json())
 
 ---
 
+### 🗓 2026-08-14（审批人自动分配 + 一键部署脚本 + parent_id 清空修复）
+
+#### ① 新建项目自动分配审批人（移除前端审批人选择器）✅
+- **需求**：新建项目登记中，去掉审批人选项，审批人在用户管理中已定义（上级关系），项目直接到定义好的审批人账户去审批。
+- **实现**：
+  - 后端 [projects.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/projects.py) `create_project`：自动从 `current_user.parent_id` 获取审批人；无上级时兜底取第一个 admin。创建后直接进入 `pending_approval` 状态。
+  - 前端 [ProjectForm.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/ProjectForm.jsx)：移除审批人 `<select>` 下拉框，改为只读 `<input>` 显示审批人姓名（如"罗隽 (jluo)"），标签提示"系统根据用户管理中的设置自动分配"。
+  - 移除 `form.approver_id` state、validate 中的 `approver_id` 校验、submit 中的 `approver_id` 字段。
+- **测试**：jhliu（parent_id=4, jluo）创建项目 → approver_id 自动设为 4，状态 pending_approval ✅
+
+#### ② 系统管理员可审批所有项目 ✅
+- **需求**：所有账号的项目，系统管理员都可以代为审批。
+- **状态**：已实现（此前会话）。approvals.py 中 admin 角色不受审批人限制。
+
+#### ③ 用户角色修改后重新登录即生效 ✅
+- **需求**：系统管理员可以在用户管理中调整定义账户的角色，一旦修改，账号重新登录后就获得新角色的权限。
+- **状态**：已实现。JWT token 只存 user_id，每次请求 `get_current_user` 从数据库实时查询角色。
+
+#### ④ 修复用户管理中"取消上级"不生效的问题 ✅
+- **症状**：管理员将用户角色改为"档案管理"并取消上级（选"无"），保存后上级仍显示旧值。
+- **真因**：后端 [users.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/users.py) `update_user` 中 `parent_id` 的更新条件为 `user_data.parent_id is not None`，当前端传 `parent_id: null`（清空）时，`None is not None` 为 False，清空操作被跳过。
+- **修复**：改用 Pydantic 的 `model_fields_set` 检查字段是否被**显式设置**（包括设置为 None）：
+  ```python
+  updated_fields = user_data.model_fields_set
+  if 'parent_id' in updated_fields:
+      user.parent_id = user_data.parent_id  # 允许设为 None
+  ```
+- **教训**：Pydantic + SQLAlchemy 更新时，区分"字段未传"和"字段显式传了 None"非常重要。用 `model_fields_set` 而非 `is not None`。
+- **关联文件**：`backend/app/routers/users.py:update_user`
+
+#### ⑤ 一键部署脚本 deploy_all.py ✅
+- **需求**：一条命令完成打包+上传+部署+测试+GitHub同步。
+- **实现**：新建 [deploy_all.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/deploy/deploy_all.py)，包含 6 个步骤：
+  1. 打包代码（内置 package.py 逻辑）
+  2. 上传 tar（winpty 自动输密码）
+  3. 上传部署脚本
+  4. 远程部署（停服→备份→更新→恢复数据→构建前端→启动）
+  5. API 测试（健康检查+登录+项目列表）
+  6. GitHub 同步（git add+commit+push）
+- **用法**：`python deploy_all.py`（可选 `--no-deploy` / `--no-git`）
+- **更新**：[DEPLOY_INCREMENTAL.md](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/deploy/DEPLOY_INCREMENTAL.md) 已重写为一键部署文档
+- **测试结果**：打包 ✅ | 部署 ✅ (ADMIN=200) | 测试 ✅ (3 projects) | GitHub ✅ | 耗时 108.7s
+
+#### ⑥ 坑：parent_id 清空需用 model_fields_set ⚠️
+- **症状**：用户管理中"取消上级"保存后，上级仍显示旧值。
+- **真因**：`user_data.parent_id is not None` 无法区分"未传"和"传了 null"。
+- **教训**：Pydantic v2 的 `model_fields_set` 属性返回被**显式设置**的字段名集合，可以正确区分上述两种情况。所有允许清空为 NULL 的字段都应使用此方式。
+
+---
+
 ### 🗓 2026-08-13（修复审批功能 + 系统管理重启服务）
 
 #### ① 审批通过/驳回 API 修复 ✅
