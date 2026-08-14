@@ -11,7 +11,7 @@ import yaml
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app.database import engine, Base
-from app.routers import auth, users, projects, approvals, reports, file_storage
+from app.routers import auth, users, projects, approvals, reports, file_storage, system as system_router
 from app.routers.audit import router as audit_router
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -88,6 +88,9 @@ async def lifespan(app: FastAPI):
             if 'responsible_sales' not in cols:
                 c.execute("ALTER TABLE projects ADD COLUMN responsible_sales VARCHAR(100)")
                 print('[migrate] projects.responsible_sales 列已添加')
+            if 'win_bid_status_set_at' not in cols:
+                c.execute("ALTER TABLE projects ADD COLUMN win_bid_status_set_at DATETIME")
+                print('[migrate] projects.win_bid_status_set_at 列已添加')
         finally:
             c.close()
     except Exception as e:
@@ -102,8 +105,8 @@ async def lifespan(app: FastAPI):
             path = path[1:]
         c = _sqlite3.connect(path, timeout=10)
         try:
-            c.execute("UPDATE file_storage_config SET template='{responsible_sales}+{project_name}+{date}' WHERE template='{real_name}+{project_name}+{date}'")
-            if c.rowcount > 0:
+            cur = c.execute("UPDATE file_storage_config SET template='{responsible_sales}+{project_name}+{date}' WHERE template='{real_name}+{project_name}+{date}'")
+            if cur.rowcount > 0:
                 print('[migrate] file_storage_config.template 已从 {real_name} 升级为 {responsible_sales}')
             c.commit()
         finally:
@@ -188,6 +191,7 @@ app.include_router(approvals.router)
 app.include_router(reports.router)
 app.include_router(file_storage.router)
 app.include_router(audit_router)
+app.include_router(system_router.router)
 
 @app.get("/api/health")
 def health_check():

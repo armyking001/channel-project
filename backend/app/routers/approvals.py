@@ -7,7 +7,7 @@
   important: 待审批=approver_id=我 或 下属创建的 + pending_approval; 已审批=我操作过的日志
   normal: 仅查看自己已审批的日志 (一般没有, 但不能完全隐藏入口, 给只读)
 """
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_, and_, desc
 from typing import Optional
@@ -121,7 +121,7 @@ def approvals_summary(
 
 
 @router.post("/{project_id}/approve", response_model=MessageResponse)
-def approve(project_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_not_archive)):
+def approve(project_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_not_archive), request: Request = None):
     from fastapi import HTTPException
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
@@ -135,11 +135,15 @@ def approve(project_id: int, db: Session = Depends(get_db), current_user: User =
     db.add(ApprovalLog(project_id=project_id, approver_id=current_user.id,
                        action=ApprovalAction.approve))
     db.commit()
+    from app.services.audit import write_audit, AuditAction
+    write_audit(current_user, AuditAction.project_approve,
+                target_type='project', target_id=project.id, target_name=project.project_name,
+                details={}, request=request)
     return MessageResponse(message="已通过")
 
 
 @router.post("/{project_id}/reject", response_model=MessageResponse)
-def reject(project_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_not_archive)):
+def reject(project_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_not_archive), request: Request = None):
     from fastapi import HTTPException
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
@@ -153,4 +157,8 @@ def reject(project_id: int, db: Session = Depends(get_db), current_user: User = 
     db.add(ApprovalLog(project_id=project_id, approver_id=current_user.id,
                        action=ApprovalAction.reject))
     db.commit()
+    from app.services.audit import write_audit, AuditAction
+    write_audit(current_user, AuditAction.project_reject,
+                target_type='project', target_id=project.id, target_name=project.project_name,
+                details={}, request=request)
     return MessageResponse(message="已驳回")

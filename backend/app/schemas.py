@@ -124,6 +124,9 @@ class ProjectUpdate(BaseModel):
     bid_file: Optional[str] = None
     approver_id: Optional[int] = None
     responsible_sales: Optional[str] = None
+    # 中标状态非首次修改时使用：修改理由 + 管理员密码验证
+    win_bid_change_reason: Optional[str] = None
+    admin_password_verify: Optional[str] = None
 
     @field_validator('tender_time', 'bid_time', mode='before')
     @classmethod
@@ -159,6 +162,7 @@ class ProjectResponse(BaseModel):
     project_amount: float
     expected_amount: float
     win_bid_status: WinBidStatus
+    win_bid_status_set_at: Optional[datetime] = None
     project_overview: Optional[str] = None
     tender_file: Optional[str]
     bid_file: Optional[str]

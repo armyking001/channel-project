@@ -13,7 +13,8 @@ from app.schemas import (
 from app.auth import get_current_user, require_admin, require_important_or_admin, require_not_archive
 from app.services.file_storage import create_project_folders
 from app.services.audit import write_audit
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 router = APIRouter(prefix="/api/projects", tags=["项目管理"])
 log = logging.getLogger("projects")
@@ -215,12 +216,31 @@ def update_project(
     # 2. 非 admin 角色修改 win_bid_status 会被忽略
     is_admin = current_user.role == UserRole.admin
     
-    # 获取允许更新的字段
-    update_data = data.model_dump(exclude_unset=True)
+    # 获取允许更新的字段（先把验证专用字段提出来，不要进入 setattr 循环）
+    raw_data = data.model_dump(exclude_unset=True)
+    win_bid_change_reason = raw_data.pop('win_bid_change_reason', None)
+    admin_password_verify = raw_data.pop('admin_password_verify', None)
+    update_data = raw_data
     
     # 非管理员不能修改 win_bid_status
     if not is_admin and 'win_bid_status' in update_data:
         del update_data['win_bid_status']
+
+    # 中标状态修改权限校验：
+    # - 首次修改（win_bid_status_set_at is None）：admin 可直接改
+    # - 非首次修改（win_bid_status_set_at is not None）：admin 必须提供「修改理由」+「密码验证」
+    if 'win_bid_status' in update_data and project.win_bid_status_set_at is not None:
+        if not is_admin:
+            raise HTTPException(status_code=400, detail="中标状态已锁定，不允许再次修改")
+        # 非首次修改：要求理由 + 密码
+        if not win_bid_change_reason or not str(win_bid_change_reason).strip():
+            raise HTTPException(status_code=400, detail="非首次修改中标状态必须填写修改理由")
+        if not admin_password_verify:
+            raise HTTPException(status_code=400, detail="非首次修改中标状态必须验证管理员密码")
+        # 验证管理员密码
+        from app.auth import verify_password
+        if not verify_password(admin_password_verify, current_user.password_hash):
+            raise HTTPException(status_code=400, detail="管理员密码验证失败")
     
     # 如果没有可更新的字段，返回当前项目
     if not update_data:
@@ -234,6 +254,13 @@ def update_project(
             changes[field] = {'old': str(old_val) if old_val is not None else None,
                               'new': str(value) if value is not None else None}
         setattr(project, field, value)
+    # 第一次设置中标状态时记录时间戳（用于判定"是否首次"）
+    if 'win_bid_status' in update_data and project.win_bid_status_set_at is None:
+        project.win_bid_status_set_at = datetime.now(ZoneInfo('Asia/Shanghai'))
+        changes['win_bid_status_set_at'] = {'old': None, 'new': str(project.win_bid_status_set_at)}
+    # 非首次修改中标状态：把理由一并写入审计
+    if 'win_bid_status' in update_data and win_bid_change_reason:
+        changes['win_bid_change_reason'] = str(win_bid_change_reason).strip()
     db.commit()
     db.refresh(project)
     if changes:

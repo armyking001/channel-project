@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { getUsers, createUser, updateUser, deleteUser, rejectUser, hardDeleteUser, resetPassword } from '../api'
+import { getUsers, createUser, updateUser, deleteUser, rejectUser, hardDeleteUser, resetPassword, restartService } from '../api'
 import { useAuthStore } from '../stores/auth'
 
 const ROLE_MAP = {
@@ -115,6 +115,18 @@ export default function UserManagement() {
       fetchUsers()
     } catch (err) {
       alert(err.response?.data?.detail || '操作失败')
+    }
+  }
+
+  const handleRestart = async () => {
+    if (!confirm('确认重启后端服务？\n\n重启期间所有连接会断开（约 5-10 秒），之后会自动恢复。\n请勿在审批提交过程中执行。')) return
+    try {
+      const res = await restartService()
+      alert(res.data?.message || '服务重启命令已发出')
+      // 5 秒后尝试刷新页面看是否恢复
+      setTimeout(() => { window.location.reload() }, 7000)
+    } catch (err) {
+      alert(err.response?.data?.detail || '重启失败')
     }
   }
 
@@ -420,9 +432,14 @@ export default function UserManagement() {
           )}
         </div>
         {isAdmin && (
-          <button onClick={openCreate} className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">
-            新建用户
-          </button>
+          <div className="flex gap-2">
+            <button onClick={openCreate} className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">
+              新建用户
+            </button>
+            <button onClick={handleRestart} className="bg-amber-500 text-white px-4 py-2 rounded hover:bg-amber-600">
+              重启服务
+            </button>
+          </div>
         )}
       </div>
 

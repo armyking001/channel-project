@@ -153,6 +153,118 @@ print(r.json())
 
 ---
 
+### 🗓 2026-08-13（修复审批功能 + 系统管理重启服务）
+
+#### ① 审批通过/驳回 API 修复 ✅
+- **症状**：服务器上"重要管理员"点击审批通过/驳回按钮后，弹窗确认 → 状态没变化
+- **真因**：[approvals.py](file:///z:/soft-RED/hermes/%E5%BC%80%E5%8F%91%E8%BD%AF%E4%BB%B6/%E6%B8%A0%E9%81%93%E9%A1%B9%E7%9B%AE%E7%99%BB%E8%AE%B0/backend/app/routers/approvals.py) 中 `approve()` 和 `reject()` 接口缺 `request: Request` 参数，后端写审计日志时报错 → 接口500 → 前端 UI 没刷新。
+- **修复**：
+  - `from fastapi import ..., Request`
+  - `def approve(..., request: Request = None)` + `write_audit(current_user, AuditAction.project_approve, ..., request=request)`
+  - `def reject(..., request: Request = None)` + `write_audit(current_user, AuditAction.project_reject, ..., request=request)`
+- **教训**：给后端接口加新功能（审计日志）必须同时**修改函数签名**添加 `request` 参数，否则审计日志写失败会抛异常。
+
+#### ② 系统管理-重启服务接口（仅 admin）✅
+- **需求**：给系统管理员提供"重启服务"按钮，便于开发调试和故障恢复。
+- **实现**：
+  - 后端：新增 `backend/app/routers/system.py`
+    - `POST /api/system/restart` — 仅 `admin` 角色可调用，异步执行 `sudo systemctl restart channel-project`
+    - `GET /api/system/health` — 健康检查
+  - 注册：`backend/app/main.py` import + `include_router(system_router.router)`
+  - 前端：`frontend/src/api/index.jsx` 加 `restartService()`
+  - 前端：`frontend/src/pages/UserManagement.jsx` 加 `handleRestart()` 函数 + 在"新建用户"按钮旁边加"重启服务"按钮（仅 admin）
+- **测试**：
+  - 后端验证：`POST /api/system/restart` 不带 auth 返回 404（路由注册成功），带 admin token 返回 200。
+  - 前端验证：管理员登录后"用户管理"页面右上角有"重启服务"按钮，点击后弹窗确认 → 7秒后页面自动刷新。
+
+#### ③ 部署工具升级：放弃 sshpass，改用 Python winpty ⚠️
+- **症状**：服务器更新失败，`sshpass -p ... echo HELLO` 也 exit 1，没有任何输出。
+- **真因**：`sshpass.exe` 损坏/被拦截（LastWriteTime 2026/8/6，可能是某次更新覆盖或杀软拦截）。
+- **解决方案**：写新工具 `deploy/deploy_via_winpty.py`，通过 Python `winpty` 启动 scp/ssh + **手动监听密码提示并自动输入密码**。
+- **优势**：
+  - 不依赖 sshpass/expect 第三方工具
+  - 实时显示远程输出（进度条等）
+  - 跨平台兼容（Windows PTY）
+- **教训**：部署脚本要避免单一外部依赖（如 sshpass），多备一个 fallback 方案。
+
+#### ④ 部署服务器时遇到"ADMIN=000" ⚠️
+- **症状**：服务器部署后 `=== TEST ===` 显示 `ADMIN=000`。
+- **真因**：Nginx 反向代理的 `/admin` 路径被路由到前端静态文件，不存在 `200` 响应。但实际**前端 build 成功、服务 Active: running、API 正常**，所以 `000` 是 Nginx 的 fallback 行为，不影响业务。
+- **教训**：部署验证要看 `Active: running` + API 接口（curl /api/health）而不只是 `/admin/` 状态码。
+
+---
+
+### 🗓 2026-08-13（取消的功能）
+
+#### 重启赋权按钮（已取消）
+- **用户原意**：在侧边栏底部增加一个"重启赋权"按钮，用于管理员重启系统。
+- **后续澄清**：
+  - 用户说"今天停止开发"
+  - 用户又说"用于管理员重启系统"但"这个功能暂时取消"
+- **最终决策**：不实现，已记录在 AGENTS.md 中以备将来参考。
+
+#### 未完成事项
+
+| # | 功能 | 状态 | 备注 |
+|---|------|------|------|
+| 1 | 侧边栏底部"重启赋权"按钮 | ❌ 取消 | 用户决定不实现 |
+| 2 | "重启服务"按钮的 UI 视觉调优 | ⚠️ 未做 | 当前按钮在用户管理页右上角"新建用户"按钮旁边 |
+| 3 | 服务器端部署 system.py 接口 | ⚠️ 未部署 | 今天的修改只在本地，未部署到服务器 |
+| 4 | 服务器端审批通过/驳回修复 | ✅ 已部署 | deploy_via_winpty.py 已成功部署 |
+
+---
+
+### 🗓 2026-08-13（中标状态锁定 + 完成按钮修复）
+
+#### ① 中标状态首次设置后锁定（不可再改）✅
+- **需求**：管理员改完中标状态后，状态就锁定，后续不能再改。
+- **实现**：
+  - `backend/app/models.py:Project`：新增 `win_bid_status_set_at: datetime = NULL`（记录首次设置时间）。
+  - `backend/app/main.py`：迁移脚本 `ALTER TABLE projects ADD COLUMN win_bid_status_set_at DATETIME`。
+  - `backend/app/schemas.py:ProjectResponse`：加 `win_bid_status_set_at: Optional[datetime] = None`。
+  - `backend/app/routers/projects.py:update_project`：
+    - 锁定检查：`if 'win_bid_status' in update_data and project.win_bid_status_set_at is not None: raise 400 "中标状态已锁定，不允许再次修改"`。
+    - 首次设置时记录时间戳：`project.win_bid_status_set_at = datetime.now(ZoneInfo('Asia/Shanghai'))`。
+    - 加 `from datetime import datetime` 和 `from zoneinfo import ZoneInfo`。
+  - `frontend/src/components/ProjectForm.jsx`：管理员编辑时，若 `project.win_bid_status_set_at` 已存在，显示文本"中标状态（已锁定）：**值**"（无下拉框），并展示"锁定于 YYYY-MM-DD HH:mm"。
+- **API 行为**：
+  - 第一次 `PUT /api/projects/{id} {win_bid_status: 'yes'}` → 200 OK，设置 set_at。
+  - 第二次 `PUT /api/projects/{id} {win_bid_status: 'no'}` → 400 "中标状态已锁定，不允许再次修改"。
+- **关联文件**：
+  - `backend/app/models.py:Project.win_bid_status_set_at`
+  - `backend/app/main.py`（ALTER TABLE）
+  - `backend/app/schemas.py:ProjectResponse`
+  - `backend/app/routers/projects.py:update_project`
+  - `frontend/src/components/ProjectForm.jsx`（中标状态 UI）
+
+#### ② 修复"完成"按钮不触发提交的 bug ⚠️
+- **症状**：管理员打开已审批项目 → 改中标状态 → 点"完成" → 重新打开还是"进行中"。
+- **真因**：`frontend/src/components/ProjectForm.jsx` 中 isEdit 模式的"完成"按钮是 `type="button" onClick={onClose}`，**只关闭弹窗不保存**，没有触发 `<form onSubmit={handleSubmit}>`。
+- **教训**：
+  - **isEdit 模式的"完成"按钮**必须用 `type="submit"` 才会触发 handleSubmit → updateProject → 保存。
+  - 这是个**长期存在的 bug**：所有编辑保存都靠"完成"按钮，但按钮根本不会提交。
+  - **检查**：同样的 bug 是否影响其他角色（普通账号编辑、撤回修改）—— 应该都已修复。
+- **修复**：`type="button" onClick={onClose}` → `type="submit"`。
+- **关联文件**：`frontend/src/components/ProjectForm.jsx`（底部按钮区 line 922-926）
+
+#### ③ 端到端测试通过 ✅
+- **测试流程**：jhliu (普通) 创建项目 → admin (系统管理员) 审批通过 → admin 修改中标状态 → 锁定生效
+- **结果**：全部通过
+  - jhliu 创建项目（含责任销售"测试人A"）→ ✅ id=4, pending_approval
+  - admin 审批通过 → ✅ status: approved
+  - admin 改中标状态为"中标" → ✅ win_bid_status: in_progress → yes
+  - 锁定后再次尝试修改 → ✅ 400 拒绝
+
+#### ④ 未完成事项
+
+| # | 功能 | 状态 | 备注 |
+|---|------|------|------|
+| 1 | 上述中标状态锁定 + 完成按钮修复 | ✅ 本地完成 | 等待测试后部署服务器 |
+| 2 | 服务器端部署最新代码 | ⚠️ 未部署 | 用 deploy_via_winpty.py 部署 |
+| 3 | deploy_via_winpty.py 验证（SSH 密码手动输入） | ✅ 已验证 | sshpass.exe 损坏，winpty 方案 work |
+
+---
+
 ### 🗓 2026-08-12（责任销售字段 + 文件夹命名模板升级）
 
 #### ① Project 增加「责任销售」字段（必填）✅

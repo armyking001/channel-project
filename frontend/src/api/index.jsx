@@ -60,6 +60,9 @@ export const getApprovalSummary = () => api.get('/approvals/summary')
 export const fastApprove = (id) => api.post(`/approvals/${id}/approve`)
 export const fastReject = (id) => api.post(`/approvals/${id}/reject`)
 
+// 系统管理（仅 admin）
+export const restartService = () => api.post('/system/restart')
+
 // 报表管理
 export const getReportSummary = (params) => api.get('/reports/summary', { params })
 export const getReportTrend = (params) => api.get('/reports/trend', { params })

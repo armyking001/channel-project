@@ -79,6 +79,15 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
 
   const [errors, setErrors] = useState({})
 
+  // ===== 中标状态多次修改（管理员）相关状态 =====
+  // 是否已解锁中标状态（非首次修改时，弹窗验证通过后置为 true）
+  const [winBidUnlocked, setWinBidUnlocked] = useState(false)
+  // 修改中标状态弹窗
+  const [showWinBidModal, setShowWinBidModal] = useState(false)
+  const [winBidReason, setWinBidReason] = useState('')
+  const [winBidPassword, setWinBidPassword] = useState('')
+  const [winBidModalError, setWinBidModalError] = useState('')
+
   const [tenderPreview, setTenderPreview] = useState('')
   const [bidPreview, setBidPreview] = useState('')
   const [uploadingTender, setUploadingTender] = useState(false)
@@ -243,6 +252,11 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
       expected_amount: (parseFloat(form.expected_amount) || 0),
       project_amount: (parseFloat(form.expected_amount) || 0) * 10000,
       approver_id: form.approver_id ? parseInt(form.approver_id) : null,
+    }
+    // 管理员非首次修改中标状态：把弹窗输入的理由和密码一起传给后端
+    if (isAdmin && isEdit && project?.win_bid_status_set_at && winBidUnlocked) {
+      data.win_bid_change_reason = winBidReason.trim()
+      data.admin_password_verify = winBidPassword
     }
     try {
       if (isEdit) await updateProject(project.id, data)
@@ -517,18 +531,49 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
             {/* 管理员可修改中标状态 */}
             {isAdmin && (
               <div className="mt-3 pt-3 border-t border-blue-200">
-                <div className="flex items-center gap-3">
-                  <label className="text-sm font-medium text-gray-700">中标状态（可修改）：</label>
-                  <select 
-                    value={form.win_bid_status}
-                    onChange={e => setForm(f => ({ ...f, win_bid_status: e.target.value }))}
-                    className="border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:ring-2 focus:ring-green-200 focus:border-green-500"
-                  >
-                    <option value="in_progress">进行中</option>
-                    <option value="yes">中标</option>
-                    <option value="no">未中标</option>
-                  </select>
-                  <span className="text-xs text-gray-400">修改后保存生效</span>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <label className="text-sm font-medium text-gray-700">
+                    中标状态{project?.win_bid_status_set_at ? (winBidUnlocked ? '（已解锁，可再次修改）' : '（已锁定）') : '（可修改）'}：
+                  </label>
+                  {/* 显示逻辑：
+                      - 首次修改（set_at 为空）：直接显示下拉框
+                      - 非首次未解锁（set_at 存在，unlocked=false）：显示文本 + "修改中标状态"按钮
+                      - 非首次已解锁（set_at 存在，unlocked=true）：显示下拉框
+                  */}
+                  {project?.win_bid_status_set_at && !winBidUnlocked ? (
+                    <>
+                      <span className="text-sm font-semibold text-gray-700">
+                        {form.win_bid_status === 'in_progress' ? '进行中' : form.win_bid_status === 'yes' ? '中标' : '未中标'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setWinBidReason('')
+                          setWinBidPassword('')
+                          setWinBidModalError('')
+                          setShowWinBidModal(true)
+                        }}
+                        className="px-3 py-1 text-xs bg-amber-500 hover:bg-amber-600 text-white rounded-md transition shadow-sm"
+                      >
+                        🔓 修改中标状态
+                      </button>
+                    </>
+                  ) : (
+                    <select
+                      value={form.win_bid_status}
+                      onChange={e => setForm(f => ({ ...f, win_bid_status: e.target.value }))}
+                      className="border border-gray-300 rounded-md px-3 py-1.5 text-sm focus:ring-2 focus:ring-green-200 focus:border-green-500"
+                    >
+                      <option value="in_progress">进行中</option>
+                      <option value="yes">中标</option>
+                      <option value="no">未中标</option>
+                    </select>
+                  )}
+                  <span className="text-xs text-gray-400">
+                    {project?.win_bid_status_set_at
+                      ? `首次设置于 ${project.win_bid_status_set_at?.slice(0, 16)?.replace('T', ' ')}${winBidUnlocked ? '（已通过验证解锁）' : '（再次修改需验证密码）'}`
+                      : '首次修改后保存生效，后续修改需填写理由并验证密码'}
+                  </span>
                 </div>
               </div>
             )}
@@ -908,7 +953,7 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
                 继续编辑（保存修改）
               </button>
             ) : isEdit ? (
-              <button type="button" onClick={onClose}
+              <button type="submit"
                 className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition shadow-sm">
                 完成
               </button>
@@ -950,6 +995,85 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
               <button onClick={confirmOverwrite}
                 className="px-4 py-2 bg-amber-600 text-white rounded hover:bg-amber-700">
                 确认覆盖
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 中标状态再次修改 - 理由 + 密码验证弹窗 */}
+      {showWinBidModal && (
+        <div className="fixed inset-0 z-[70] bg-black/50 flex items-center justify-center p-4"
+             onClick={(e) => { if (e.target === e.currentTarget) setShowWinBidModal(false) }}>
+          <div className="bg-white rounded-lg shadow-2xl max-w-md w-full p-6">
+            <div className="text-lg font-bold text-gray-800 mb-1 flex items-center gap-2">
+              🔓 解锁中标状态修改
+            </div>
+            <p className="text-xs text-gray-500 mb-4">
+              项目「{project?.project_name}」的中标状态已设置过，再次修改需填写理由并验证管理员密码。
+            </p>
+
+            {/* 修改理由 */}
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                修改理由<span className="text-red-500 ml-1">*</span>
+              </label>
+              <textarea
+                value={winBidReason}
+                onChange={e => setWinBidReason(e.target.value)}
+                placeholder="请说明修改中标状态的原因（如：客户变更结果、录入错误等）"
+                rows={3}
+                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-amber-200 focus:border-amber-500 resize-none"
+              />
+            </div>
+
+            {/* 管理员密码 */}
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                管理员密码<span className="text-red-500 ml-1">*</span>
+              </label>
+              <input
+                type="password"
+                value={winBidPassword}
+                onChange={e => setWinBidPassword(e.target.value)}
+                placeholder="请输入您的登录密码进行身份验证"
+                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-amber-200 focus:border-amber-500"
+              />
+            </div>
+
+            {winBidModalError && (
+              <div className="mb-4 text-xs text-red-600 bg-red-50 border border-red-200 rounded p-2">
+                {winBidModalError}
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowWinBidModal(false)}
+                className="px-5 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50 transition"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  // 前端基本校验
+                  if (!winBidReason.trim()) {
+                    setWinBidModalError('请填写修改理由')
+                    return
+                  }
+                  if (!winBidPassword) {
+                    setWinBidModalError('请输入管理员密码')
+                    return
+                  }
+                  setWinBidModalError('')
+                  setWinBidUnlocked(true)
+                  setShowWinBidModal(false)
+                }}
+                className="px-5 py-2 bg-amber-600 text-white rounded-md hover:bg-amber-700 transition shadow-sm"
+              >
+                确认解锁
               </button>
             </div>
           </div>

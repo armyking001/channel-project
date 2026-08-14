@@ -123,6 +123,7 @@ class Project(Base):
     project_amount = Column(Float, default=0.0)  # 预计金额（万元，前端用 0.0 表示）
     expected_amount = Column(Float, default=0.0)
     win_bid_status = Column(Enum(WinBidStatus), default=WinBidStatus.in_progress)
+    win_bid_status_set_at = Column(DateTime, nullable=True)  # 中标状态首次设置时间（锁定后不允许修改）
     project_overview = Column(Text, nullable=True)
     tender_file = Column(String(500), nullable=True)
     bid_file = Column(String(500), nullable=True)
