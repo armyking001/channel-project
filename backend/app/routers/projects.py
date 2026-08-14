@@ -130,11 +130,21 @@ def create_project(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_not_archive)
 ):
-    # 必填校验：项目名称 / 审批人（招标/投标时间为选填）
+    # 必填校验：项目名称
     if not (data.project_name and data.project_name.strip()):
         raise HTTPException(status_code=422, detail="项目名称不能为空")
-    if not data.approver_id:
-        raise HTTPException(status_code=422, detail="审批人为必填项")
+
+    # 自动获取审批人：优先使用当前用户的上级（parent_id），没有上级则用系统管理员
+    approver_id = None
+    if current_user.parent_id:
+        approver_id = current_user.parent_id
+    else:
+        # 兜底：取第一个 admin 作为审批人
+        admin_user = db.query(User).filter(User.role == UserRole.admin, User.is_active == True).first()
+        if admin_user:
+            approver_id = admin_user.id
+    if not approver_id:
+        raise HTTPException(status_code=422, detail="未找到可用审批人，请在用户管理中为该账号设置上级")
 
     # 检查编号唯一（空字符串视为 None — 允许多个空项目编号）
         code = (data.project_code or '').strip() or None
@@ -166,13 +176,11 @@ def create_project(
         if payload.get(k) in ('', None):
             payload[k] = None
 
-    # 创建后自动进入"待审批"状态（用户保存即视为提交审批）
-    # 注意：若未指定审批人，保持 pending_submit（草稿），避免出现"提交了但没人审批"
-    initial_status = (
-        ApprovalStatus.pending_approval
-        if payload.get('approver_id')
-        else ApprovalStatus.pending_submit
-    )
+    # 使用自动获取的审批人，创建后直接进入"待审批"状态
+    initial_status = ApprovalStatus.pending_approval
+
+    # 用自动获取的审批人覆盖表单中的 approver_id
+    payload['approver_id'] = approver_id
 
     project = Project(
         **payload,

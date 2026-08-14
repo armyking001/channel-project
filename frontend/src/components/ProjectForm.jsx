@@ -74,7 +74,6 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
     is_sm: initial('is_sm', 'no'),
     win_bid_status: initial('win_bid_status', 'in_progress'),
     project_overview: initial('project_overview'),
-    approver_id: initial('approver_id') || '',
   })
 
   const [errors, setErrors] = useState({})
@@ -220,7 +219,6 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
     if (!form.partner_company?.trim()) errs.partner_company = '公司名称必填'
     if (!form.contact_person?.trim()) errs.contact_person = '联系人必填'
     if (!form.contact_info?.trim()) errs.contact_info = '联系方式必填'
-    if (!form.approver_id) errs.approver_id = '审批人必填'
     setErrors(errs)
     if (Object.keys(errs).length) {
       const firstKey = Object.keys(errs)[0]
@@ -251,7 +249,6 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
       fee_amount: form.fee_mode === 'charged' ? (parseFloat(form.fee_amount) || 0) * 10000 : null,
       expected_amount: (parseFloat(form.expected_amount) || 0),
       project_amount: (parseFloat(form.expected_amount) || 0) * 10000,
-      approver_id: form.approver_id ? parseInt(form.approver_id) : null,
     }
     // 管理员非首次修改中标状态：把弹窗输入的理由和密码一起传给后端
     if (isAdmin && isEdit && project?.win_bid_status_set_at && winBidUnlocked) {
@@ -906,23 +903,29 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
           </div>
         </div>
 
-        {/* 区域 5: 审批人（新建/撤回修改） */}
+        {/* 区域 5: 审批人（只读显示，由系统自动分配） */}
         {(!isEdit || withdrawMode) && (
           <div className="mb-5">
             <div className={`${withdrawMode ? 'bg-purple-50 border-purple-500' : 'bg-green-50 border-green-500'} border-l-4 px-3 py-1.5 mb-3`}>
-              <span className={`text-sm font-bold ${withdrawMode ? 'text-purple-700' : 'text-green-700'}`}>审批人<Star /></span>
+              <span className={`text-sm font-bold ${withdrawMode ? 'text-purple-700' : 'text-green-700'}`}>审批人</span>
+              <span className="text-xs text-gray-500 ml-2">（系统根据用户管理中的设置自动分配）</span>
             </div>
             <div>
-              <select value={form.approver_id}
-                onChange={e => setForm(f => ({ ...f, approver_id: e.target.value }))}
-                className={errors.approver_id ? inputErrCls : inputCls}>
-                <option value="">请选择审批人</option>
-                {users.map(u => (
-                  <option key={u.id} value={u.id}>
-                    {u.real_name} ({u.username}) - {u.role === 'admin' ? '系统管理员' : u.role === 'important' ? '重要账号' : u.role === 'archive' ? '档案管理' : '普通账号'}
-                  </option>
-                ))}
-              </select>
+              <input
+                type="text"
+                value={
+                  project?.approver?.real_name
+                    ? `${project.approver.real_name} (${project.approver.username})`
+                    : (() => {
+                        const approver = users.find(u => u.id === currentUser?.parent_id)
+                        return approver
+                          ? `${approver.real_name} (${approver.username})`
+                          : '系统管理员'
+                      })()
+                }
+                readOnly
+                className="w-full border border-gray-200 rounded-md px-3 py-2 bg-gray-50 text-gray-700"
+              />
             </div>
           </div>
         )}

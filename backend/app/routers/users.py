@@ -107,28 +107,37 @@ def update_user(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail='用户不存在')
+    
+    # 使用 model_fields_set 检查字段是否被显式设置（包括设置为 None）
+    updated_fields = user_data.model_fields_set
+    
     changes = {}
-    if user_data.username is not None and user_data.username != user.username:
-        # 唯一性校验
-        existing = db.query(User).filter(User.username == user_data.username, User.id != user_id).first()
-        if existing:
-            raise HTTPException(status_code=400, detail=f'账号 {user_data.username} 已被其他用户占用')
-        changes['username'] = {'old': user.username, 'new': user_data.username}
-        user.username = user_data.username
-    if user_data.real_name is not None and user_data.real_name != user.real_name:
-        changes['real_name'] = {'old': user.real_name, 'new': user_data.real_name}
-        user.real_name = user_data.real_name
-    if user_data.role is not None:
+    if 'username' in updated_fields and user_data.username is not None:
+        if user_data.username != user.username:
+            # 唯一性校验
+            existing = db.query(User).filter(User.username == user_data.username, User.id != user_id).first()
+            if existing:
+                raise HTTPException(status_code=400, detail=f'账号 {user_data.username} 已被其他用户占用')
+            changes['username'] = {'old': user.username, 'new': user_data.username}
+            user.username = user_data.username
+    if 'real_name' in updated_fields and user_data.real_name is not None:
+        if user_data.real_name != user.real_name:
+            changes['real_name'] = {'old': user.real_name, 'new': user_data.real_name}
+            user.real_name = user_data.real_name
+    if 'role' in updated_fields and user_data.role is not None:
         new_role_val = user_data.role.value if hasattr(user_data.role, 'value') else str(user_data.role)
         old_role_val = user.role.value if hasattr(user.role, 'value') else str(user.role)
         if new_role_val != old_role_val:
             changes['role'] = {'old': old_role_val, 'new': new_role_val}
         user.role = user_data.role
-    if user_data.parent_id is not None and user_data.parent_id != user.parent_id:
-        changes['parent_id'] = {'old': user.parent_id, 'new': user_data.parent_id}
+    # parent_id: 允许显式设置为 None（清空上级）
+    if 'parent_id' in updated_fields:
+        if user_data.parent_id != user.parent_id:
+            changes['parent_id'] = {'old': user.parent_id, 'new': user_data.parent_id}
         user.parent_id = user_data.parent_id
-    if user_data.is_active is not None and user_data.is_active != user.is_active:
-        changes['is_active'] = {'old': user.is_active, 'new': user_data.is_active}
+    if 'is_active' in updated_fields and user_data.is_active is not None:
+        if user_data.is_active != user.is_active:
+            changes['is_active'] = {'old': user.is_active, 'new': user_data.is_active}
         user.is_active = user_data.is_active
     if user_data.password:
         user.password_hash = hash_password(user_data.password)
