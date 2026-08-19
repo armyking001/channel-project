@@ -86,6 +86,7 @@ class ProjectBase(BaseModel):
     bid_file: Optional[str] = None
     approver_id: Optional[int] = None
     responsible_sales: Optional[str] = None
+    storage_zone_id: Optional[int] = None  # 存储区域（默认使用系统默认区域）
 
 class ProjectCreate(ProjectBase):
     responsible_sales: str = Field(..., min_length=1, max_length=100)  # 责任销售必填（用于文件夹命名）
@@ -124,6 +125,7 @@ class ProjectUpdate(BaseModel):
     bid_file: Optional[str] = None
     approver_id: Optional[int] = None
     responsible_sales: Optional[str] = None
+    storage_zone_id: Optional[int] = None
     # 中标状态非首次修改时使用：修改理由 + 管理员密码验证
     win_bid_change_reason: Optional[str] = None
     admin_password_verify: Optional[str] = None
@@ -145,6 +147,8 @@ class ProjectResponse(BaseModel):
     project_name: str
     project_code: Optional[str] = None
     project_type: ProjectType
+    source: Optional[str] = 'channel'  # channel=渠道项目 / self=自建项目
+    form_instance_id: Optional[int] = None
     tender_time: Optional[date] = None
     bid_time: Optional[date] = None
     owner_contact_person: Optional[str] = None
@@ -169,6 +173,8 @@ class ProjectResponse(BaseModel):
     tender_folder: Optional[str] = None
     bid_folder: Optional[str] = None
     responsible_sales: Optional[str] = None
+    storage_zone_id: Optional[int] = None
+    storage_zone: Optional['StorageZoneResponse'] = None
     created_by: int
     approver_id: Optional[int]
     approval_status: ApprovalStatus
@@ -244,6 +250,10 @@ class PathPreviewRequest(BaseModel):
     # 已有项目目录直接回传（用数据库存的 tender_folder/bid_folder）
     existing_tender_folder: Optional[str] = None
     existing_bid_folder: Optional[str] = None
+    # 项目来源：channel=渠道项目（FileStorageConfig）/ self=自建项目（按 storage_zone_id 找 zone）
+    source: Optional[str] = None
+    # 存储区域 id（自建项目用，决定 webdav_base_path）
+    storage_zone_id: Optional[int] = None
 
 
 class PathPreviewResponse(BaseModel):
@@ -272,5 +282,153 @@ class AuditLogResponse(BaseModel):
 class AuditLogListResponse(BaseModel):
     items: List[AuditLogResponse]
     total: int
-    page: int
-    page_size: int
+
+
+# ============ 表单生成器 ============
+class FormTemplateCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = None
+    fields: List[dict] = Field(default_factory=list)
+    storage_sub_path: Optional[str] = None
+    storage_zone_id: Optional[int] = None
+
+class FormTemplateUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    fields: Optional[List[dict]] = None
+    is_active: Optional[bool] = None
+    storage_sub_path: Optional[str] = None
+    storage_zone_id: Optional[int] = None
+
+class FormTemplateResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    name: str
+    description: Optional[str] = None
+    fields: List[dict] = []
+    storage_sub_path: Optional[str] = None
+    storage_zone_id: Optional[int] = None
+    is_active: bool = True
+    created_by: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    creator: Optional[UserResponse] = None
+    storage_zone: Optional['StorageZoneResponse'] = None
+
+    @field_validator('fields', mode='before')
+    @classmethod
+    def parse_fields(cls, v):
+        if isinstance(v, str):
+            import json
+            return json.loads(v)
+        return v or []
+
+
+# ============ 存储区域 ============
+class StorageZoneCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    mode: str = 'webdav'  # 'local' | 'webdav'
+    local_path: Optional[str] = None
+    webdav_url: Optional[str] = None
+    webdav_port: Optional[int] = None
+    webdav_use_ssl: bool = True
+    webdav_username: Optional[str] = None
+    webdav_password: Optional[str] = None
+    webdav_base_path: Optional[str] = None
+    sub_path: Optional[str] = None
+    description: Optional[str] = None
+    sort_order: int = 0
+
+class StorageZoneUpdate(BaseModel):
+    name: Optional[str] = None
+    mode: Optional[str] = None
+    local_path: Optional[str] = None
+    webdav_url: Optional[str] = None
+    webdav_port: Optional[int] = None
+    webdav_use_ssl: Optional[bool] = None
+    webdav_username: Optional[str] = None
+    webdav_password: Optional[str] = None
+    webdav_base_path: Optional[str] = None
+    sub_path: Optional[str] = None
+    description: Optional[str] = None
+    is_active: Optional[bool] = None
+    sort_order: Optional[int] = None
+
+class StorageZoneResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    name: str
+    mode: str
+    local_path: Optional[str] = None
+    webdav_url: Optional[str] = None
+    webdav_port: Optional[int] = None
+    webdav_use_ssl: bool = True
+    webdav_username: Optional[str] = None
+    # 出于安全考虑不返回密码明文；如需明文密码请用专门接口
+    webdav_password_masked: Optional[str] = None
+    webdav_base_path: Optional[str] = None
+    sub_path: Optional[str] = None
+    description: Optional[str] = None
+    is_active: bool = True
+    sort_order: int = 0
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    @field_validator('mode', mode='before')
+    @classmethod
+    def parse_mode(cls, v):
+        if hasattr(v, 'value'):
+            return v.value
+        return v
+
+    @field_validator('webdav_use_ssl', mode='before')
+    @classmethod
+    def parse_bool(cls, v):
+        if isinstance(v, int):
+            return bool(v)
+        return v
+
+class StorageZoneListResponse(BaseModel):
+    items: List[StorageZoneResponse]
+    total: int
+
+class FormInstanceCreate(BaseModel):
+    template_id: int
+    data: dict
+
+class FormInstanceResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    template_id: int
+    data: dict = {}
+    tender_folder: Optional[str] = None
+    bid_folder: Optional[str] = None
+    storage_zone_id: Optional[int] = None
+    storage_zone: Optional['StorageZoneResponse'] = None
+    approver_id: Optional[int] = None
+    approver: Optional[UserResponse] = None
+    approval_status: Optional[str] = None
+    created_by: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    creator: Optional[UserResponse] = None
+    template: Optional[FormTemplateResponse] = None
+
+    @field_validator('data', mode='before')
+    @classmethod
+    def parse_data(cls, v):
+        if isinstance(v, str):
+            import json
+            return json.loads(v)
+        return v or {}
+
+    @field_validator('approval_status', mode='before')
+    @classmethod
+    def parse_status(cls, v):
+        if hasattr(v, 'value'):
+            return v.value
+        return v
+
+class FormInstanceListResponse(BaseModel):
+    items: List[FormInstanceResponse]
+    total: int

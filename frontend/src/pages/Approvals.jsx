@@ -144,6 +144,7 @@ export default function Approvals() {
             <tr>
               <th className="px-3 py-2 text-left">序号</th>
               <th className="px-3 py-2 text-left">项目名称</th>
+              <th className="px-3 py-2 text-left">项目类型</th>
               <th className="px-3 py-2 text-left">编号</th>
               <th className="px-3 py-2 text-left">合作单位</th>
               <th className="px-3 py-2 text-right">金额(元)</th>
@@ -158,15 +159,22 @@ export default function Approvals() {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={10} className="text-center py-8 text-gray-400">加载中…</td></tr>
+              <tr><td colSpan={11} className="text-center py-8 text-gray-400">加载中…</td></tr>
             ) : items.length === 0 ? (
-              <tr><td colSpan={10} className="text-center py-8 text-gray-400">暂无数据</td></tr>
+              <tr><td colSpan={11} className="text-center py-8 text-gray-400">暂无数据</td></tr>
             ) : items.map((p, idx) => {
               const st = STATUS_MAP[p.approval_status]
               return (
                 <tr key={p.id} className="border-t hover:bg-gray-50">
                   <td className="px-3 py-2 text-gray-500">{(page - 1) * 20 + idx + 1}</td>
                   <td className="px-3 py-2">{p.project_name}</td>
+                  <td className="px-3 py-2">
+                    {p.source === 'self' ? (
+                      <span className="px-2 py-0.5 rounded text-xs bg-emerald-100 text-emerald-700">自营项目</span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded text-xs bg-blue-100 text-blue-700">渠道项目</span>
+                    )}
+                  </td>
                   <td className="px-3 py-2 font-mono text-xs">{p.project_code}</td>
                   <td className="px-3 py-2">{p.partner_company}</td>
                   <td className="px-3 py-2 text-right">{Number(p.project_amount).toLocaleString()}</td>

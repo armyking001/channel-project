@@ -1,541 +1,256 @@
-# AI 协作指南（AGENTS.md）
+# Agents 记录 — 渠道项目登记
 
-> 本文件供任何 AI 助手（Trae / Cursor / Copilot / Claude / GPT 等）快速理解本项目架构、历史决策、当前痛点。
-> **修改代码前必读**。
+本文档记录本项目中由 Agent 实施的关键功能与改动。
 
-## 🏗️ 项目一句话总结
+---
 
-**渠道项目登记与审批管理系统** —— 政企/事业单位内部用的项目管理 SaaS。技术栈：FastAPI + SQLAlchemy + React + Vite。功能：项目登记、文件管理（支持 WebDAV 远程 NAS）、审批、报表、用户管理。
+## 1. 存储区域（StorageZone）多区域管理
 
-## 📁 关键文件速查
+### 背景
 
-| 任务 | 看这个文件 |
-|---|---|
-| 前端文件管理弹窗 | `frontend/src/components/ProjectForm.jsx`（line 92-150 是 fetchFiles，最常被改）|
-| 后端 list-files / upload | `backend/app/routers/file_storage.py` |
-| WebDAV 客户端 | `backend/app/services/webdav_client.py`（注意 `_space_variants_for_project` 函数：处理"采购项目"↔"采 购项目"路径兼容）|
-| 用户登录 / 申请账号 | `backend/app/routers/auth.py` |
-| 用户管理前端 | `frontend/src/pages/UserManagement.jsx` |
-| 拼音→账号生成 | `backend/app/services/pinyin_util.py`（字典可能不全，遇到生僻字需补）|
-| 数据库模型 | `backend/app/models.py` |
-| API schemas | `backend/app/schemas.py` |
-| 配置加载 | `backend/app/main.py:21 load_config()` |
+原系统只有一个 `FileStorageConfig`（单例 `id=1`），所有项目共用同一套 NAS 连接配置。
+业务上需要：
+- 用户可自定义多个文件存储位置（命名、本地或 WebDAV/NAS）
+- 不同表单/项目可选择使用不同的存储区域
+- 文件按所选区域 + 子路径自动落到 NAS 的不同目录
 
-## 🚨 已踩过的坑（AI 不要重复犯错）
+### 数据模型
 
-### 坑 1：ProjectForm 文件列表不显示
-- **症状**：编辑项目时"文件管理"区一直显示"暂无文件"
-- **真因**：两个 useEffect 并发请求 → race condition → tenderFiles 被刷成 []
-- **教训**：
-  - 文件系统类功能，**后端是路径的唯一事实来源**
-  - 前端不要用 `target_dir` 字符串拼接猜测路径
-  - API 调用必须用 `project_id` 让后端查表
-  - 已修复：合并 useEffect + `isSubscribed` 标志位 + 串行 await
+- **新表 `storage_zones`**：
+  - `id`, `name`(唯一), `mode`(local/webdav)
+  - `local_path` / `webdav_url` + `webdav_port` + `webdav_use_ssl`
+  - `webdav_username` + `webdav_password`
+  - `webdav_base_path`（NAS 起始路径）
+  - `sub_path`（区域下的子路径，用于分类）
+  - `description`, `is_active`, `sort_order`
+- **新增字段**：
+  - `projects.storage_zone_id` → `storage_zones.id`（每个项目可单独指定）
+  - `form_templates.storage_zone_id` → `storage_zones.id`（每个表单模板默认指定）
+- **保留兼容**：旧的 `file_storage_config` 表保留，启动时自动迁移为「默认存储」区域
 
-### 坑 2：路径空格 "采购项目" vs "采 购项目"
-- **背景**：WebDAV 目录里历史数据有空格变体
-- **真因**：前端 slice 字符串插空格的逻辑太脆弱（错位）
-- **教训**：用 `str.replace('采购项目', '采 购项目')` 精准替换，不要启发式
+### API
 
-### 坑 3：硬编码敏感信息
-- 已检查：无 `Synology2020` / `admin123` / 真实 IP 残留
-- 配置（JWT secret / WebDAV 密码）在 `backend/config.yaml`，**`.gitignore` 已排除**
-- 默认管理员密码从 `DEFAULT_ADMIN_PASSWORD` 环境变量读
-
-### 坑 4：时间显示为 UTC，差 8 小时
-- **症状**：项目创建时间是 `06:31`，但系统时间是 `14:31`
-- **真因**：后端 SQLAlchemy 用 `datetime.utcnow()` 写入的是 UTC 时间；前端 `dayjs(s)` 直接 format 会把 UTC 当本地时间显示。
-- **教训**：
-  - **不要**用 `dayjs(s).format('YYYY-MM-DD HH:mm')` 直接显示 UTC 时间字符串
-  - **必须**用 `dayjs.utc(s).tz('Asia/Shanghai').format('YYYY-MM-DD HH:mm')`
-  - 或者用原生 API：`new Date(s+'Z').toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })`
-  - 需要导入 `dayjs/plugin/utc` 和 `dayjs/plugin/timezone` 并 `dayjs.extend(...)`
-- **涉及文件**：`Projects.jsx` / `Approvals.jsx` / `UserManagement.jsx` / `AuditLogs.jsx` 全部已加时区转换
-
-### 坑 5：WebDAV 上 PROPFIND / MKCOL 报 405（Method Not Allowed）
-- **症状**：创建项目时，WebDAV 返回 405，前端报错"父目录未就绪"
-- **真因**：NAS WebDAV 服务不支持 PROPFIND（资源浏览）和 MKCOL（创建目录），但目录其实**已经存在**（管理员在 NAS 上手动建过）。
-- **教训**：
-  - 405 **不等于**目录不存在，是 NAS 不支持该方法
-  - `ensure_webdav_folders` 已改造：PROPFIND/MKCOL 报 405 时视为"目录已存在"，继续后续流程
-- **涉及文件**：`backend/app/services/file_storage.py:ensure_webdav_folders`
-
-### 坑 6：onDelete 回调没传 id 导致 404
-- **症状**：撤回模式下点"删除项目"，确认后项目还在
-- **真因**：`onDelete={handleDelete}` 直接传函数引用，调用时 `handleDelete()` 没传 id → `DELETE /api/projects/undefined` → 404
-- **教训**：父组件传回调给子组件时，**必须**用 `() => handler(args)` 绑定参数，不要直接传函数引用
-
-### 坑 7：DB template 字段不会自动跟随代码默认值更新
-- **症状**：前端传 `responsible_sales='测试人A'` → 预览路径仍是 `刘建辉+...`（创建者姓名）
-- **真因**：`FileStorageConfig.template` 是数据库**配置项**，不是代码常量。即使代码 `default='{responsible_sales}+...'` 已改，**已存在的数据库行不会自动更新**。模板里**没有 `{responsible_sales}` 占位符** → 永远只渲染 `{real_name}`。
-- **教训**：
-  - 涉及模板字符串拼接的"业务配置项"都要**双重保障**：① 代码默认值更新；② 启动时**显式迁移 UPDATE** 数据库。
-  - **不要相信"render 函数接受了 responsible_sales 参数就以为会用上"**——模板字符串才是真相。
-  - 部署完必须 `SELECT template FROM file_storage_config;` 验证。
-- **涉及文件**：`backend/app/main.py`（UPDATE脚本）+ `backend/app/models.py`（默认值）
-
-## 🎯 当前功能模块状态
-
-| 模块 | 状态 | 备注 |
+| 方法 | 路径 | 说明 |
 |---|---|---|
-| 项目登记 | ✅ 稳定 | 字段级权限 + 创建人列 + 北京时区 |
-| 项目撤回 | ✅ 稳定 | 仅普通账号可撤回自己的项目；含"撤回修改"模式 |
-| 文件管理 | ✅ 稳定 | 已修 race condition + 405 兼容 |
-| WebDAV | ✅ 稳定 | 兼容空格变体 + 405 当已存在 |
-| 申请账号 | ✅ 稳定 | 公开接口 + 返回初始密码 + 支持同名复用 |
-| 用户审批 | ✅ 稳定 | 5 个 Tab + 批量操作 + 自动填初始密码 |
-| 修改密码 | ✅ 稳定 | 所有角色可改自己的密码 |
-| 报表 | ✅ 稳定 | Excel 导出 |
-| 审计日志 | ✅ 稳定 | 全操作留痕 + 北京时区 |
+| GET | `/api/storage-zones` | 列出所有区域 |
+| GET | `/api/storage-zones/{id}` | 获取单个区域 |
+| POST | `/api/storage-zones` | 创建区域（admin） |
+| PUT | `/api/storage-zones/{id}` | 更新区域（admin） |
+| DELETE | `/api/storage-zones/{id}` | 删除区域（admin，需检查无项目使用） |
+| POST | `/api/storage-zones/{id}/test-connection` | 测试连通性 |
 
-## 🔧 常用调试模式
+### 路径计算
 
-### 后端日志
-```bash
-tail -f backend/app_debug.log
-# 或
-Get-Content backend/uvicorn.err.log -Wait
+```
+local:  {local_path}/{sub_path?}/{responsible_sales}+{project_name}+{date}
+webdav: {scheme}://{host}[:port]/{webdav_base_path}/{sub_path?}/{...}/{招标资料|投标文档}
 ```
 
-### 重启后端
+### 前端
+
+- **入口**：`/admin/storage-zones` 页面，提供 CRUD、测试连接功能
+- **入口位置**：「文件管理」页面右上角「🌐 存储区域管理」按钮
+- **表单管理**：`FormBuilder.jsx` 顶部下拉选择存储区域
+- **项目列表**：`ProjectForm.jsx` 审批人区域下方新增「存储区域」下拉
+
+### 文件
+
+- 后端模型：[backend/app/models.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/models.py)
+- 后端路由：[backend/app/routers/storage_zones.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/storage_zones.py)
+- Schemas：[backend/app/schemas.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/schemas.py)
+- 文件存储服务：[backend/app/services/file_storage.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/services/file_storage.py)
+- 表单文件存储服务：[backend/app/services/form_file_storage.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/services/form_file_storage.py)
+- 前端 API：[frontend/src/api/index.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/api/index.jsx)
+- 前端页面：[frontend/src/pages/StorageZones.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/StorageZones.jsx)
+- 项目表单 UI：[frontend/src/components/ProjectForm.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/ProjectForm.jsx)
+
+---
+
+## 2. 内置表单模板（渠道项目登记表 / 自建项目登记表）
+
+### 背景
+
+- 系统内两份内置表单模板，启动时自动同步到 `form_templates` 表
+- 字段定义严格对齐 `ProjectForm.jsx`，实现「所见即所得」
+- 自建项目登记表与渠道项目登记表字段集完全一致，仅文件存储位置不同（自建项目使用 NAS 子目录「自建项目/」）
+
+### 字段分区（22 项）
+
+| 分区 | 字段数 | 字段 |
+|---|---|---|
+| 项目基本信息 | 9 | 项目名称、责任销售、项目编号、项目类型、预计金额、招标时间、投标时间、业主联系人、业主联系方式 |
+| 合作基本情况 | 10 | 公司名称、公司地址、主要资质、法定代表、联系人、联系方式、合作模式、费用模式、中标状态、是否SM |
+| 项目基本情况 | 1 | 项目基本情况（textarea） |
+| 文件管理 | 2 | 招标资料、投标文档（多文件上传） |
+
+### 关键文件
+
+- [backend/app/services/builtin_templates.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/services/builtin_templates.py)
+- [frontend/src/data/projectFormTemplate.js](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/data/projectFormTemplate.js)
+
+---
+
+## 3. 表单生成器（FormBuilder）— 所见即所得
+
+### 背景
+
+原 FormBuilder 是单列拖拽布局，与实际渲染表单（两列）不一致。
+改造后 FormBuilder 中栏直接渲染真实的分区 + 两列字段，编辑体验 = 实际使用体验。
+
+### 实现
+
+- 中栏：分区用绿色标题条 + 左侧绿色竖线（与 ProjectForm 一致）
+- 分区内字段以两列网格渲染
+- 每个字段卡片直接渲染真实控件（text/number/date/select/file）
+- 分区标题可点击重命名，顶部「+ 添加新分区」按钮
+- 分区底部「+ 单行文本/数字/日期/下拉/文件…」快捷按钮
+- 顶部工具栏：「从渠道项目模板加载」「从自建项目模板加载」一键复制字段
+
+### 关键文件
+
+- [frontend/src/pages/FormBuilder.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/FormBuilder.jsx)
+- [frontend/src/pages/FormTemplates.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/FormTemplates.jsx)
+
+---
+
+## 4. DynamicForm 样式统一
+
+### 背景
+
+「DynamicForm」与「ProjectForm」原本样式不一致。两者合并为同一套视觉风格：
+
+- 题头：`h3 text-xl font-bold text-gray-800` + 右上角模式徽章
+- 分区标题：`bg-green-50 border-l-4 border-green-500`
+- 字段：2 列网格（`grid grid-cols-2 gap-x-8 gap-y-3`）
+- 文件管理：2 列布局（招标资料 + 投标文档）
+- 审批人：只读显示
+- 底部：「取消」+「提交」按钮
+
+### 关键文件
+
+- [frontend/src/components/DynamicForm.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/DynamicForm.jsx)
+- [frontend/src/components/ProjectForm.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/ProjectForm.jsx)
+
+---
+
+## 5. 部署与服务端口
+
+### 本地启动（端口 8765）
+
+Windows 8000 端口被 Hyper-V 保留（7904-8003 范围），因此本地测试用 8765：
+
 ```powershell
-Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep 2
 cd backend
-Start-Process -FilePath python -ArgumentList '-m','uvicorn','app.main:app','--host','0.0.0.0','--port','8000' -RedirectStandardOutput 'uvicorn.out.log' -RedirectStandardError 'uvicorn.err.log' -WindowStyle Hidden
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8765
 ```
 
-### 重新构建前端
-```powershell
-cd frontend
-npm run build   # 输出到 ../backend/static/
-```
+访问：`http://127.0.0.1:8765/admin/`
 
-### 端到端诊断：调 list-files
-```python
-import requests
-r = requests.post('http://127.0.0.1:8000/api/file-storage/list-files', 
-                  json={'project_id': 47, 'folder_type': 'tender'},
-                  headers={'Authorization': f'Bearer {TOKEN}'})
-print(r.json())
-```
+### 生产部署
 
-## 🛠️ 部署架构
-
-- **生产部署**：`backend/main.py` 把 `static/` 挂到 `/admin/`
-- **前端构建产物**：`backend/static/index.html` + `assets/index-*.js`
-- **开发模式**：前端 `npm run dev`（端口 5173）→ Vite 代理到后端 8000
-
-## 📝 修改代码的检查清单
-
-1. **是否需要更新 schema？** → `backend/app/schemas.py`
-2. **是否需要更新数据库模型？** → `backend/app/models.py`（旧表用 `ALTER TABLE` 兼容）
-3. **前端是否需要新 API 调用？** → `frontend/src/api/index.jsx`
-4. **是否影响其他角色？** → 检查 `require_admin` / `require_important_or_admin`
-5. **是否需要写审计？** → `audit.log(...)` 留痕
-6. **时间显示一定要用北京时区**：`dayjs.utc(s).tz('Asia/Shanghai').format(...)` 或 `toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })`
-7. **WebDAV 操作不要因为 405 就报错**：可能是 NAS 不支持该方法，目录其实存在
-8. **commit message 写清楚动机**，不只写"what"
-
-## 🆘 遇到问题先查
-
-1. `backend/uvicorn.err.log` - 后端启动错误
-2. `backend/app_debug.log` - 业务日志（含 list-files 的 target_dir）
-3. 浏览器 DevTools → Network → 看实际请求和响应
-4. `DEBUG_NOTE.md` - 历史 bug 分析（很可能有答案）
-5. `git log --oneline -20` - 最近改了什么
+- 服务器：`172.16.10.92:26731`
+- 使用 `python deploy/deploy_all.py` 一键部署
 
 ---
 
-## 📜 变更日志（Chronological Changelog）
+## 6. 数据库自动迁移
 
-按时间倒序记录「用户提的需求」与「已实施的改动」，方便后续 AI 助手快速理解近期上下文。
+应用启动时自动执行以下迁移：
 
----
-
-### 🗓 2026-08-14（审批人自动分配 + 一键部署脚本 + parent_id 清空修复）
-
-#### ① 新建项目自动分配审批人（移除前端审批人选择器）✅
-- **需求**：新建项目登记中，去掉审批人选项，审批人在用户管理中已定义（上级关系），项目直接到定义好的审批人账户去审批。
-- **实现**：
-  - 后端 [projects.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/projects.py) `create_project`：自动从 `current_user.parent_id` 获取审批人；无上级时兜底取第一个 admin。创建后直接进入 `pending_approval` 状态。
-  - 前端 [ProjectForm.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/ProjectForm.jsx)：移除审批人 `<select>` 下拉框，改为只读 `<input>` 显示审批人姓名（如"罗隽 (jluo)"），标签提示"系统根据用户管理中的设置自动分配"。
-  - 移除 `form.approver_id` state、validate 中的 `approver_id` 校验、submit 中的 `approver_id` 字段。
-- **测试**：jhliu（parent_id=4, jluo）创建项目 → approver_id 自动设为 4，状态 pending_approval ✅
-
-#### ② 系统管理员可审批所有项目 ✅
-- **需求**：所有账号的项目，系统管理员都可以代为审批。
-- **状态**：已实现（此前会话）。approvals.py 中 admin 角色不受审批人限制。
-
-#### ③ 用户角色修改后重新登录即生效 ✅
-- **需求**：系统管理员可以在用户管理中调整定义账户的角色，一旦修改，账号重新登录后就获得新角色的权限。
-- **状态**：已实现。JWT token 只存 user_id，每次请求 `get_current_user` 从数据库实时查询角色。
-
-#### ④ 修复用户管理中"取消上级"不生效的问题 ✅
-- **症状**：管理员将用户角色改为"档案管理"并取消上级（选"无"），保存后上级仍显示旧值。
-- **真因**：后端 [users.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/users.py) `update_user` 中 `parent_id` 的更新条件为 `user_data.parent_id is not None`，当前端传 `parent_id: null`（清空）时，`None is not None` 为 False，清空操作被跳过。
-- **修复**：改用 Pydantic 的 `model_fields_set` 检查字段是否被**显式设置**（包括设置为 None）：
-  ```python
-  updated_fields = user_data.model_fields_set
-  if 'parent_id' in updated_fields:
-      user.parent_id = user_data.parent_id  # 允许设为 None
-  ```
-- **教训**：Pydantic + SQLAlchemy 更新时，区分"字段未传"和"字段显式传了 None"非常重要。用 `model_fields_set` 而非 `is not None`。
-- **关联文件**：`backend/app/routers/users.py:update_user`
-
-#### ⑤ 一键部署脚本 deploy_all.py ✅
-- **需求**：一条命令完成打包+上传+部署+测试+GitHub同步。
-- **实现**：新建 [deploy_all.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/deploy/deploy_all.py)，包含 6 个步骤：
-  1. 打包代码（内置 package.py 逻辑）
-  2. 上传 tar（winpty 自动输密码）
-  3. 上传部署脚本
-  4. 远程部署（停服→备份→更新→恢复数据→构建前端→启动）
-  5. API 测试（健康检查+登录+项目列表）
-  6. GitHub 同步（git add+commit+push）
-- **用法**：`python deploy_all.py`（可选 `--no-deploy` / `--no-git`）
-- **更新**：[DEPLOY_INCREMENTAL.md](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/deploy/DEPLOY_INCREMENTAL.md) 已重写为一键部署文档
-- **测试结果**：打包 ✅ | 部署 ✅ (ADMIN=200) | 测试 ✅ (3 projects) | GitHub ✅ | 耗时 108.7s
-
-#### ⑥ 坑：parent_id 清空需用 model_fields_set ⚠️
-- **症状**：用户管理中"取消上级"保存后，上级仍显示旧值。
-- **真因**：`user_data.parent_id is not None` 无法区分"未传"和"传了 null"。
-- **教训**：Pydantic v2 的 `model_fields_set` 属性返回被**显式设置**的字段名集合，可以正确区分上述两种情况。所有允许清空为 NULL 的字段都应使用此方式。
+1. `file_storage_config.template`：从 `{real_name}` 升级到 `{responsible_sales}`
+2. 创建 `storage_zones` 表（如不存在）
+4. `projects.storage_zone_id`、`form_templates.storage_zone_id`：添加列（如不存在）
+5. 同步「默认存储」区域（从旧配置迁移）
+6. 同步两份内置表单模板（渠道项目登记表 / 自建项目登记表）
 
 ---
 
-### 🗓 2026-08-13（修复审批功能 + 系统管理重启服务）
+## 7. 自建项目逻辑与渠道项目平行
 
-#### ① 审批通过/驳回 API 修复 ✅
-- **症状**：服务器上"重要管理员"点击审批通过/驳回按钮后，弹窗确认 → 状态没变化
-- **真因**：[approvals.py](file:///z:/soft-RED/hermes/%E5%BC%80%E5%8F%91%E8%BD%AF%E4%BB%B6/%E6%B8%A0%E9%81%93%E9%A1%B9%E7%9B%AE%E7%99%BB%E8%AE%B0/backend/app/routers/approvals.py) 中 `approve()` 和 `reject()` 接口缺 `request: Request` 参数，后端写审计日志时报错 → 接口500 → 前端 UI 没刷新。
-- **修复**：
-  - `from fastapi import ..., Request`
-  - `def approve(..., request: Request = None)` + `write_audit(current_user, AuditAction.project_approve, ..., request=request)`
-  - `def reject(..., request: Request = None)` + `write_audit(current_user, AuditAction.project_reject, ..., request=request)`
-- **教训**：给后端接口加新功能（审计日志）必须同时**修改函数签名**添加 `request` 参数，否则审计日志写失败会抛异常。
+### 背景
 
-#### ② 系统管理-重启服务接口（仅 admin）✅
-- **需求**：给系统管理员提供"重启服务"按钮，便于开发调试和故障恢复。
-- **实现**：
-  - 后端：新增 `backend/app/routers/system.py`
-    - `POST /api/system/restart` — 仅 `admin` 角色可调用，异步执行 `sudo systemctl restart channel-project`
-    - `GET /api/system/health` — 健康检查
-  - 注册：`backend/app/main.py` import + `include_router(system_router.router)`
-  - 前端：`frontend/src/api/index.jsx` 加 `restartService()`
-  - 前端：`frontend/src/pages/UserManagement.jsx` 加 `handleRestart()` 函数 + 在"新建用户"按钮旁边加"重启服务"按钮（仅 admin）
-- **测试**：
-  - 后端验证：`POST /api/system/restart` 不带 auth 返回 404（路由注册成功），带 admin token 返回 200。
-  - 前端验证：管理员登录后"用户管理"页面右上角有"重启服务"按钮，点击后弹窗确认 → 7秒后页面自动刷新。
+用户要求「自建项目建立的逻辑和渠道项目逻辑一样，二者是平行关系」。本节记录将自建项目（FormInstance）路径与列表展现对齐渠道项目（Project）的所有改动。
 
-#### ③ 部署工具升级：放弃 sshpass，改用 Python winpty ⚠️
-- **症状**：服务器更新失败，`sshpass -p ... echo HELLO` 也 exit 1，没有任何输出。
-- **真因**：`sshpass.exe` 损坏/被拦截（LastWriteTime 2026/8/6，可能是某次更新覆盖或杀软拦截）。
-- **解决方案**：写新工具 `deploy/deploy_via_winpty.py`，通过 Python `winpty` 启动 scp/ssh + **手动监听密码提示并自动输入密码**。
-- **优势**：
-  - 不依赖 sshpass/expect 第三方工具
-  - 实时显示远程输出（进度条等）
-  - 跨平台兼容（Windows PTY）
-- **教训**：部署脚本要避免单一外部依赖（如 sshpass），多备一个 fallback 方案。
+### 关键设计
 
-#### ④ 部署服务器时遇到"ADMIN=000" ⚠️
-- **症状**：服务器部署后 `=== TEST ===` 显示 `ADMIN=000`。
-- **真因**：Nginx 反向代理的 `/admin` 路径被路由到前端静态文件，不存在 `200` 响应。但实际**前端 build 成功、服务 Active: running、API 正常**，所以 `000` 是 Nginx 的 fallback 行为，不影响业务。
-- **教训**：部署验证要看 `Active: running` + API 接口（curl /api/health）而不只是 `/admin/` 状态码。
+- **存储位置**：渠道项目 → NAS `渠道资料/`；自建项目 → NAS `自营资料/`，由模板的 `storage_zone_id` 决定
+- **项目根目录命名**：均使用 `{responsible_sales}+{project_name}+{date}`（责任销售 + 项目名 + 项目建立日期）
+- **审批人**：自动从 `current_user.parent_id` 解析，兜底用 `admin`，不暴露给用户选择
+- **审批状态**：自建项目创建后直接进入 `pending_approval`（待审批）
+- **list 中显示**：自建项目同步写入 `projects` 表（`source='self'` + `form_instance_id`），与渠道项目同一表同一列表
 
----
+### 后端改动
 
-### 🗓 2026-08-13（取消的功能）
+| 改动 | 文件 |
+|---|---|
+| `FormInstance` 增字段：`storage_zone_id` / `approver_id` / `approval_status` / `updated_at` | [backend/app/models.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/models.py) |
+| `Project` 增字段：`source` (`channel`/`self`) + `form_instance_id` | [backend/app/models.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/models.py) |
+| `create_instance` 严格调用 `create_project_folders`（与渠道项目同一函数） | [backend/app/routers/forms.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/forms.py) |
+| `create_instance` 自动按模板的 `storage_zone_id` 构造虚拟 FileStorageConfig（参考渠道项目逻辑） | [backend/app/routers/forms.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/forms.py) |
+| `create_instance` 同时在 `projects` 表创建 `source='self'` 记录（让自建项目出现在项目列表） | [backend/app/routers/forms.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/forms.py) |
+| `create_project` 恢复原始逻辑（只用 FileStorageConfig + create_project_folders；抛弃 StorageZone 直传） | [backend/app/routers/projects.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/projects.py) |
+| `list_projects` 支持 `source` 过滤 | [backend/app/routers/projects.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/projects.py) |
+| `compute_form_folders` 已有 tender_folder/bid_folder 时直接复用（**避免 initFormFolders 重复创建**） | [backend/app/services/form_file_storage.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/services/form_file_storage.py) |
+| `PathPreviewRequest` 增 `source`/`storage_zone_id` 字段 | [backend/app/schemas.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/schemas.py) |
+| `preview-path` 接口识别 `source='self'` → 走 StorageZone，反之走 FileStorageConfig | [backend/app/routers/file_storage.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/file_storage.py) |
 
-#### 重启赋权按钮（已取消）
-- **用户原意**：在侧边栏底部增加一个"重启赋权"按钮，用于管理员重启系统。
-- **后续澄清**：
-  - 用户说"今天停止开发"
-  - 用户又说"用于管理员重启系统"但"这个功能暂时取消"
-- **最终决策**：不实现，已记录在 AGENTS.md 中以备将来参考。
+### 前端改动
 
-#### 未完成事项
+| 改动 | 文件 |
+|---|---|
+| `DynamicForm` 提交后**删除** `initFormFolders` 调用（避免重复创建） | [frontend/src/components/DynamicForm.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/DynamicForm.jsx) |
+| `DynamicForm` 提交时按 label 反查「责任销售 / 项目名称 / 合作单位 / 项目类型」字段并映射到约定英文 key | [frontend/src/components/DynamicForm.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/DynamicForm.jsx) |
+| `DynamicForm` 路径预览按 label 反查「责任销售」「项目名称」，并展示完整路径（含 `webdav_base_path`） | [frontend/src/components/DynamicForm.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/DynamicForm.jsx) |
+| `ProjectForm` 调用 preview-path 时传 `project.source` / `project.storage_zone_id` | [frontend/src/components/ProjectForm.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/ProjectForm.jsx) |
+| `Projects.jsx` 筛选栏新增「项目类型」下拉（全部 / 渠道项目 / 自建项目） | [frontend/src/pages/Projects.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/Projects.jsx) |
 
-| # | 功能 | 状态 | 备注 |
-|---|------|------|------|
-| 1 | 侧边栏底部"重启赋权"按钮 | ❌ 取消 | 用户决定不实现 |
-| 2 | "重启服务"按钮的 UI 视觉调优 | ⚠️ 未做 | 当前按钮在用户管理页右上角"新建用户"按钮旁边 |
-| 3 | 服务器端部署 system.py 接口 | ⚠️ 未部署 | 今天的修改只在本地，未部署到服务器 |
-| 4 | 服务器端审批通过/驳回修复 | ✅ 已部署 | deploy_via_winpty.py 已成功部署 |
+### 关键决策记录
+
+1. **字段 key 是 FormBuilder 生成的** `field_${timestamp}_${counter}` **形式**，约定在自定义表单中：
+   - label `责任销售` → 后端字段 `responsible_sales`
+   - label `项目名称` / `项目名` → 后端字段 `project_name`
+   - label `合作单位` / `合作公司` → 后端字段 `partner_company`
+   - label `项目类型` → 后端字段 `project_type`
+2. **`create_instance` 不会触发 `initFormFolders`**，改为 `create_instance` 时直接调用 `create_project_folders`（与渠道项目同函数）
+3. **`compute_form_folders` 幂等**：实例已有 `tender_folder`/`bid_folder` 时直接复用，仅做一次 MKCOL 检查
+4. **存储路径选择**：自建项目（模板 `storage_zone_id=3`）→ 「自营资料」；渠道项目 → 「渠道资料」。前端路径预览与编辑时都按 `source` 参数区分
 
 ---
 
-### 🗓 2026-08-13（中标状态锁定 + 完成按钮修复）
+## 8. 命名统一：「自建项目」→「自营项目」
 
-#### ① 中标状态首次设置后锁定（不可再改）✅
-- **需求**：管理员改完中标状态后，状态就锁定，后续不能再改。
-- **实现**：
-  - `backend/app/models.py:Project`：新增 `win_bid_status_set_at: datetime = NULL`（记录首次设置时间）。
-  - `backend/app/main.py`：迁移脚本 `ALTER TABLE projects ADD COLUMN win_bid_status_set_at DATETIME`。
-  - `backend/app/schemas.py:ProjectResponse`：加 `win_bid_status_set_at: Optional[datetime] = None`。
-  - `backend/app/routers/projects.py:update_project`：
-    - 锁定检查：`if 'win_bid_status' in update_data and project.win_bid_status_set_at is not None: raise 400 "中标状态已锁定，不允许再次修改"`。
-    - 首次设置时记录时间戳：`project.win_bid_status_set_at = datetime.now(ZoneInfo('Asia/Shanghai'))`。
-    - 加 `from datetime import datetime` 和 `from zoneinfo import ZoneInfo`。
-  - `frontend/src/components/ProjectForm.jsx`：管理员编辑时，若 `project.win_bid_status_set_at` 已存在，显示文本"中标状态（已锁定）：**值**"（无下拉框），并展示"锁定于 YYYY-MM-DD HH:mm"。
-- **API 行为**：
-  - 第一次 `PUT /api/projects/{id} {win_bid_status: 'yes'}` → 200 OK，设置 set_at。
-  - 第二次 `PUT /api/projects/{id} {win_bid_status: 'no'}` → 400 "中标状态已锁定，不允许再次修改"。
-- **关联文件**：
-  - `backend/app/models.py:Project.win_bid_status_set_at`
-  - `backend/app/main.py`（ALTER TABLE）
-  - `backend/app/schemas.py:ProjectResponse`
-  - `backend/app/routers/projects.py:update_project`
-  - `frontend/src/components/ProjectForm.jsx`（中标状态 UI）
+### 背景
 
-#### ② 修复"完成"按钮不触发提交的 bug ⚠️
-- **症状**：管理员打开已审批项目 → 改中标状态 → 点"完成" → 重新打开还是"进行中"。
-- **真因**：`frontend/src/components/ProjectForm.jsx` 中 isEdit 模式的"完成"按钮是 `type="button" onClick={onClose}`，**只关闭弹窗不保存**，没有触发 `<form onSubmit={handleSubmit}>`。
-- **教训**：
-  - **isEdit 模式的"完成"按钮**必须用 `type="submit"` 才会触发 handleSubmit → updateProject → 保存。
-  - 这是个**长期存在的 bug**：所有编辑保存都靠"完成"按钮，但按钮根本不会提交。
-  - **检查**：同样的 bug 是否影响其他角色（普通账号编辑、撤回修改）—— 应该都已修复。
-- **修复**：`type="button" onClick={onClose}` → `type="submit"`。
-- **关联文件**：`frontend/src/components/ProjectForm.jsx`（底部按钮区 line 922-926）
+为与后端 NAS 目录命名（`自营资料/`）一致，将前端用户可见的「自建项目」字样统一改为「自营项目」。同时后端内置表单模板同步更名。
 
-#### ③ 端到端测试通过 ✅
-- **测试流程**：jhliu (普通) 创建项目 → admin (系统管理员) 审批通过 → admin 修改中标状态 → 锁定生效
-- **结果**：全部通过
-  - jhliu 创建项目（含责任销售"测试人A"）→ ✅ id=4, pending_approval
-  - admin 审批通过 → ✅ status: approved
-  - admin 改中标状态为"中标" → ✅ win_bid_status: in_progress → yes
-  - 锁定后再次尝试修改 → ✅ 400 拒绝
+### 改动清单
 
-#### ④ 未完成事项
+| 项目 | 修改前 | 修改后 |
+|---|---|---|
+| 按钮「自营项目新建」 | 自建项目新建 | 自营项目新建 |
+| 项目类型筛选下拉 | 自建项目 | 自营项目 |
+| 内置表单模板名 | 自建项目登记表 | 自营项目登记表 |
+| 内置模板描述 | 自建项目登记表单... | 自营项目登记表单... |
+| 内置模板 `storage_sub_path` | 自建项目 | 自营项目 |
+| `DynamicForm` 标题判断 | 仅识别 `渠道/自建项目登记表` | 同时识别 `自营项目登记表` |
+| `Projects.jsx` 模板查找 | `name.includes('自建项目')` | `name.includes('自建项目') \|\| name.includes('自营项目')`（兼容） |
+| 错误提示 | 未找到"自建项目登记表"模板 | 未找到"自营项目登记表"模板 |
 
-| # | 功能 | 状态 | 备注 |
-|---|------|------|------|
-| 1 | 上述中标状态锁定 + 完成按钮修复 | ✅ 本地完成 | 等待测试后部署服务器 |
-| 2 | 服务器端部署最新代码 | ⚠️ 未部署 | 用 deploy_via_winpty.py 部署 |
-| 3 | deploy_via_winpty.py 验证（SSH 密码手动输入） | ✅ 已验证 | sshpass.exe 损坏，winpty 方案 work |
+### 数据库迁移
 
----
+`backend/app/main.py` 启动时检测到旧名「自建项目登记表」记录时，自动重命名为「自营项目登记表」（避免重复创建）。
 
-### 🗓 2026-08-12（责任销售字段 + 文件夹命名模板升级）
+### 兼容策略
 
-#### ① Project 增加「责任销售」字段（必填）✅
-- **需求**：项目基本信息加"责任销售"字段（必填），用于命名项目目录。
-- **实现**：
-  - `backend/app/models.py:Project`：新增 `responsible_sales: Optional[str] = NULL`，迁移脚本 `ALTER TABLE projects ADD COLUMN responsible_sales VARCHAR(100)`。
-  - `backend/app/schemas.py`：
-    - `ProjectBase` 加 `responsible_sales` 字段。
-    - `ProjectCreate.responsible_sales: str = Field(..., min_length=1)` 强制必填。
-    - `ProjectUpdate` 和 `ProjectResponse` 加 `responsible_sales`。
-  - `frontend/src/components/ProjectForm.jsx`：
-    - 表单 state 加 `responsible_sales`。
-    - 输入框标签加红星 `<Star />`（必填）。
-    - `validate()` 加 `errs.responsible_sales = '责任销售必填'`。
-    - 提交时 `responsible_sales: form.responsible_sales?.trim() || ''`。
-- **关联文件**：
-  - `backend/app/models.py:Project.responsible_sales`
-  - `backend/app/main.py`（ALTER TABLE 迁移）
-  - `backend/app/schemas.py:ProjectCreate.responsible_sales`
-  - `frontend/src/components/ProjectForm.jsx`
+- 后端迁移代码兼容旧记录（已存在的「自建项目登记表」会被改名为「自营项目登记表」）
+- 前端模板查找同时识别「自建项目」与「自营项目」两个关键字
+- `DynamicForm` 标题判断同时兼容三个模板名
+- 数据库枚举字段 `Project.source` 仍为 `self`（值未改），前端文案为「自营项目」
 
-#### ② 文件夹命名模板升级：`{real_name}` → `{responsible_sales}` ✅
-- **需求**：生成的目录名从"姓名+项目名称+建立时间"改为"责任销售+项目名称+建立时间"。
-- **实现**：
-  - `backend/app/models.py:FileStorageConfig.template`：默认值从 `'{real_name}+{project_name}+{date}'` 改为 `'{responsible_sales}+{project_name}+{date}'`。
-  - `backend/app/services/file_storage.py:render_base_folder`：模板默认 `'{responsible_sales}+...'`；`responsible_sales` 为空时**兜底**用 `real_name`（兼容老数据）。
-  - `backend/app/routers/file_storage.py:preview_path`：传入 `responsible_sales`；**移除 `existing_tender_folder/existing_bid_folder` 兜底逻辑**（保证预览实时跟随字段变化）。
-  - `backend/app/main.py`：迁移脚本增加 `UPDATE file_storage_config SET template='...' WHERE template='{real_name}+...'`。
-  - `backend/app/schemas.py:PathPreviewRequest`：新增 `responsible_sales: Optional[str] = None`。
-  - `frontend/src/components/ProjectForm.jsx`：预览逻辑增加必填校验——只有 `project_name + responsible_sales` 都填了才调 API，否则显示"请先填写项目名称和责任销售"占位符。`useEffect` 依赖增加 `form.responsible_sales`。
-- **关联文件**：
-  - `backend/app/models.py:FileStorageConfig.template` 默认值
-  - `backend/app/services/file_storage.py:render_base_folder`
-  - `backend/app/routers/file_storage.py:preview_path`
-  - `backend/app/main.py`（template 迁移）
-  - `backend/app/schemas.py:PathPreviewRequest.responsible_sales`
-  - `frontend/src/components/ProjectForm.jsx`（预览逻辑 + useEffect 依赖）
+### 关键文件
 
-#### ③ 坑：DB template 字段不会自动更新（关键）⚠️
-- **症状**：前端传 `responsible_sales='测试人A'` → 预览路径仍是 `刘建辉+项目名称+...`（创建者姓名）。
-- **真因**：后端 `FileStorageConfig.template` 是数据库**配置项**，不是代码常量。即使代码默认改了，**已存在的数据库行不会自动更新**。模板里**没有 `{responsible_sales}` 占位符** → 永远只渲染 `{real_name}`。
-- **教训**：
-  - 凡是涉及模板字符串拼接的"业务配置项"都要**双重保障**：① 代码默认值更新；② 启动时**显式迁移 UPDATE** 数据库。
-  - **不要相信 "render 函数接受了 responsible_sales 参数就以为会用上"**——模板才是真相。
-- **排查方法**：直接查 DB `SELECT template FROM file_storage_config;`。
-- **解决**：手动 UPDATE 服务器 DB 一次；后续重启自动 UPDATE。
+- 后端模板：[backend/app/services/builtin_templates.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/services/builtin_templates.py)
+- 后端迁移：[backend/app/main.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/main.py)
+- 前端按钮：[frontend/src/pages/Projects.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/Projects.jsx)
+- 前端标题判断：[frontend/src/components/DynamicForm.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/DynamicForm.jsx)
 
----
-
-### 🗓 2026-08-10（多角色权限 + 撤回机制 + 时区修复）
-
-#### ① 修改密码功能（所有角色可用）✅
-- **需求**：除系统管理员外，其他账号（普通/重要/档案）登录后也能改自己的密码。
-- **实现**：
-  - `backend/app/routers/auth.py`：新增 `POST /api/auth/change-password`，验证旧密码 + 新密码一致性 + 6 位以上 + 不可与旧密码相同 + 写审计日志。
-  - `backend/app/models.py:AuditAction`：新增 `USER_PASSWORD_CHANGE`。
-  - `frontend/src/components/Layout.jsx`：顶栏右上角用户名下拉菜单，新增「修改密码」「退出登录」两项。
-  - `frontend/src/components/ChangePasswordModal.jsx`（新文件）：旧密码 / 新密码 / 确认密码 三字段，含可见性切换、客户端校验、修改成功后自动退出登录。
-- **关联文件**：
-  - `backend/app/routers/auth.py:change_password`
-  - `backend/app/models.py:AuditAction`
-  - `frontend/src/components/Layout.jsx`
-  - `frontend/src/components/ChangePasswordModal.jsx`
-
-#### ② 审批弹窗自动填入申请时生成的初始密码 ✅
-- **需求**：管理员审批账号时，初始密码应自动填入申请时生成的那个密码（可改可不改），姓名仍只读。
-- **实现**：
-  - `backend/app/models.py:User` 新增 `pending_password` 字段（明文存储临时密码，待审批通过后清除）。
-  - `backend/app/main.py` 加 `ALTER TABLE users ADD COLUMN pending_password VARCHAR(64)` 兼容旧库。
-  - `backend/app/schemas.py:UserResponse` 新增 `pending_password` 字段；`UserUpdate` 支持 `password` 更新。
-  - `backend/app/routers/auth.py:apply_account`：申请时把生成的 8 位密码同时写入 `pending_password`。
-  - `backend/app/routers/auth.py:apply_account` 复用逻辑（同名 pending 申请）：**排除已驳回用户** (`is_rejected=True`)，返回之前的 `pending_password`，并把 `!PENDING_` 前缀和 `__rej_<ts>` 后缀清理掉返回给前端。
-  - `backend/app/routers/users.py:update_user`：支持更新密码并清除 `pending_password`。
-  - `frontend/src/pages/UserManagement.jsx:openApprove`：自动预填 `pending_password`；兼容老数据自动生成 8 位密码。
-- **关联文件**：
-  - `backend/app/models.py:User.pending_password`
-  - `backend/app/main.py`（ALTER TABLE）
-  - `backend/app/schemas.py:UserResponse / UserUpdate`
-  - `backend/app/routers/auth.py:apply_account`
-  - `backend/app/routers/users.py:update_user`
-  - `frontend/src/pages/UserManagement.jsx:openApprove`
-
-#### ③ 重要账号 + 系统管理员在项目列表的权限统一化 ✅
-- **需求**：
-  - 系统管理员：项目列表只有「编辑、查看、删除」，通过/驳回去审批管理。
-  - 重要账号：项目列表只有「查看」（编辑/审批去审批管理）。
-  - 普通账号：编辑（上传文件）+ 查看 +（自己的项目在待审批/已驳回时可撤回）。
-  - 档案管理：只查看。
-- **实现**：`frontend/src/pages/Projects.jsx` 重构操作矩阵。
-  - 审批按钮（通过/驳回）**完全从项目列表移除**，只在审批管理中处理。
-  - 操作按钮按角色分支判断，逻辑清晰简洁。
-- **关联文件**：`frontend/src/pages/Projects.jsx`（操作按钮区）
-
-#### ④ 项目撤回机制（普通账号）✅
-- **需求**：普通账号对自己创建的项目，在待审批/已驳回状态下可撤回，回到 `pending_submit`；撤回不影响 NAS 上已建立的目录和文件。
-- **实现**：
-  - `backend/app/models.py`：`ApprovalAction` 新增 `submit` 和 `withdraw`；`AuditAction` 新增 `project_withdraw`。
-  - `backend/app/routers/projects.py`：新增 `POST /api/projects/{id}/withdraw` 接口；`submit_project` 也写 ApprovalLog。
-  - `backend/app/routers/projects.py:update_project`：**放宽**普通账号限制（不再要求"只能编辑自己创建的"），改为"除已通过状态外都可编辑"（用于上传文件）。
-  - `backend/app/services/file_storage.py:ensure_webdav_folders`：兼容 NAS 上 PROPFIND/MKCOL 报 405 的情况（视为目录已存在）。
-  - `frontend/src/api/index.jsx`：新增 `withdrawProject`。
-  - `frontend/src/pages/Projects.jsx`：操作列加「撤回」按钮（仅普通账号 + 自己创建 + pending_approval/rejected）。
-- **关联文件**：
-  - `backend/app/models.py:ApprovalAction / AuditAction`
-  - `backend/app/routers/projects.py:withdraw_project / submit_project / update_project`
-  - `backend/app/services/file_storage.py:ensure_webdav_folders`
-  - `frontend/src/api/index.jsx:withdrawProject`
-  - `frontend/src/pages/Projects.jsx`（操作按钮区）
-
-#### ⑤ 撤回修改模式（ProjectForm withdrawMode）✅
-- **需求**：普通账号撤回项目后，进入编辑弹窗应：
-  - 标题改为「撤回修改」
-  - 项目名称只读（撤回后不可修改），其他字段全部可改 + 可改审批人
-  - 底部按钮：「删除项目 / 取消 / 继续编辑（保存修改）」
-  - 与普通"仅上传文件"编辑模式区分
-- **实现**：
-  - `frontend/src/components/ProjectForm.jsx`：新增 `withdrawMode` 和 `onDelete` props。
-  - `withdrawMode=true` 时：
-    - 标题 = 「撤回修改」
-    - 紫色提示：「项目已撤回，可修改除项目名称外的所有字段」
-    - 项目信息区显示完整表单（除项目名称只读外，其他都可编辑）
-    - 审批人区域可重新选择
-    - 底部按钮：[删除项目] [取消] [继续编辑（保存修改）]
-  - `frontend/src/pages/Projects.jsx`：判定条件 `pending_submit + 普通账号 + created_by===current_user` 时启用 `withdrawMode`。
-  - `onDelete` 回调绑定 `() => handleDelete(editData.id)`（修复了之前 onDelete 没传 id 导致 404 的 bug）。
-- **关联文件**：
-  - `frontend/src/components/ProjectForm.jsx:withdrawMode / onDelete`
-  - `frontend/src/pages/Projects.jsx`（onDelete / withdrawMode 判定）
-
-#### ⑥ 「继续提交」按钮 ✅
-- **需求**：撤回并保存修改后，项目回到 `pending_submit` 状态；项目列表应显示「继续提交」按钮，点击后项目进入 `pending_approval`（提交审批）。
-- **实现**：
-  - `frontend/src/pages/Projects.jsx`：操作列加「继续提交」按钮（仅普通账号 + 自己创建 + `pending_submit` 状态）。
-  - `handleSubmit` 增加错误处理（弹窗失败原因）。
-- **关联文件**：`frontend/src/pages/Projects.jsx`（操作按钮区 + handleSubmit）
-
-#### ⑦ 创建人列 + 时间精确到分钟 + 北京时区 ✅
-- **需求**：
-  - 所有项目列表加「创建人」列（放在"填报时间"前面），值为建立项目账号的姓名。
-  - 项目管理和审批管理中的填报时间精确到分钟（YYYY-MM-DD HH:mm）。
-  - **时间**显示必须是**系统本地时间（北京时区）**，不是 UTC。
-- **实现**：
-  - `frontend/src/pages/Projects.jsx`：表格加「创建人」列（`p.creator?.real_name`）；时间格式 `YYYY-MM-DD HH:mm`。
-  - `frontend/src/pages/Approvals.jsx`：列名「更新时间 → 填报时间」，改用 `created_at`。
-  - `frontend/src/pages/UserManagement.jsx`：`toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' })`。
-  - `frontend/src/pages/AuditLogs.jsx:formatTime`：兼容 UTC 字符串（自动加 Z 后转本地）。
-  - **关键修复**：所有页面引入 `dayjs/plugin/utc` 和 `dayjs/plugin/timezone`，用 `dayjs.utc(s).tz('Asia/Shanghai').format(...)` 转换时区（之前 `dayjs(s)` 直接显示会把 UTC 时间当本地显示，导致时间差 8 小时）。
-- **关联文件**：
-  - `frontend/src/pages/Projects.jsx`（表头 + 列 + 时间格式）
-  - `frontend/src/pages/Approvals.jsx`（列名 + 时间字段）
-  - `frontend/src/pages/UserManagement.jsx`（时间格式）
-  - `frontend/src/pages/AuditLogs.jsx:formatTime`
-
-#### ⑧ 删除项目按钮修复 ✅
-- **需求**：在撤回修改模式下的"删除项目"按钮，点了确认后无反应。
-- **真因**：`onDelete={handleDelete}` 直接传函数引用，但 `handleDelete(id)` 需要 id 参数，导致 `DELETE /api/projects/undefined` 返回 404。
-- **修复**：
-  - `frontend/src/pages/Projects.jsx`：`onDelete={() => handleDelete(editData.id)}` 绑定 id。
-  - `frontend/src/components/ProjectForm.jsx`：删除按钮加 try/catch + alert，await `onDelete()`。
-- **关联文件**：
-  - `frontend/src/pages/Projects.jsx:onDelete`
-  - `frontend/src/components/ProjectForm.jsx`（删除按钮）
-
----
-
-### 🗓 2026-08-09（业务需求调整）
-
-#### ① 拼音账号名规则修正（**进行中 / 待优化**）
-- **需求**：账号生成规则改为「**名拼音首字母 + 姓拼音全拼**」，例：`人世间 → sjren`、`张三 → szhang`、`李俊峰 → jfli`。
-- **当前状态**：
-  - 已重写 `backend/app/services/pinyin_util.py:generate_username`，逻辑改为「首字默认作为姓，复姓字典匹配保留」。
-  - 已补 `_GIVEN_NAME_PINYIN` 字典里缺失的 `世/间/人/涛/俊/峰/凯/亮/辉/健/雄/豪/玲/慧/洁/宇/宙/洪/波/湖/海/江/河/溪/德/仁/义/礼/智/信/忠/孝/廉/春/夏/秋/冬/东/南/西/北/美/丑/善/恶/爱/恨/喜/怒/哀/乐/悲/思/念/想/梦` 等常用字。
-  - 实测结果仍有偏差：`人世间 -> renshijianj`（应为 `sjren`），`刘岩 -> xliu`（应为 `yliu`）。原因：当前算法仍走「从右往左找已知姓」兜底分支，与预期不符。
-  - **下一步**：去掉兜底分支，强制「首字 = 姓」。**已暂停，等用户提供明确样例后再继续**。
-- **关联文件**：
-  - `backend/app/services/pinyin_util.py:generate_username`
-  - `backend/app/services/pinyin_util.py:_GIVEN_NAME_PINYIN`
-
-#### ② 申请账号 → 自动返回 8 位随机初始密码 ✅
-- **需求**：申请账号时系统生成随机 8 位密码，作为初始密码返回给申请人保存。
-- **实现**：
-  - `backend/app/routers/auth.py:apply_account`：使用 `secrets.choice(string.ascii_letters + string.digits)` 生成 8 位密码；同步写入 `password_hash`（申请人凭此密码 + 管理员审核通过后即可登录）。
-  - `backend/app/schemas.py:ApplyAccountResponse` 新增 `initial_password: Optional[str] = None`。
-  - `frontend/src/pages/Login.jsx` 申请成功弹窗：新增「初始密码：」行（红色 `font-mono select-all` 醒目展示）；底部提示改为「请妥善保存初始密码，管理员审核通过后即可用该账号与密码登录系统。」
-- **关联文件**：
-  - `backend/app/routers/auth.py:apply_account`
-  - `backend/app/schemas.py:ApplyAccountResponse`
-  - `frontend/src/pages/Login.jsx`（申请结果展示区域）
-
-#### ③ 登录支持账号 或 姓名 登录 ✅
-- **需求**：用户可用「账号」或「姓名」登录；登录页占位符改为「请输入账号或姓名」。
-- **实现**：
-  - `backend/app/routers/auth.py:login`：先按 `username` 精确匹配活跃用户；找不到时按 `real_name` 精确匹配。错误提示改为「账号/姓名或密码错误」。
-  - `frontend/src/pages/Login.jsx`：标签 `账号 → 账号 / 姓名`；placeholder `请输入账号 → 请输入账号或姓名`。
-- **关联文件**：
-  - `backend/app/routers/auth.py:login`
-  - `frontend/src/pages/Login.jsx`（登录表单）
-
-#### ④ 用户管理审批弹窗 → 可编辑账号名 ✅
-- **需求**：审批待申请账号时，管理员可手动修改系统自动生成的账号名。
-- **实现**：
-  - `frontend/src/pages/UserManagement.jsx`：
-    - `approveForm` 增加 `username` 字段；`openApprove` 时预填（去掉 `!PENDING_` 前缀）。
-    - 审批弹窗新增「账号名」输入框（标签带"默认系统生成，可手动修改"提示），取代之前只读展示。
-    - `handleApproveSubmit` 把用户编辑后的 `username` 传给 `updateUser`。
-- **关联文件**：
-  - `frontend/src/pages/UserManagement.jsx:approveForm`
-  - `frontend/src/pages/UserManagement.jsx:openApprove`
-  - `frontend/src/pages/UserManagement.jsx:handleApproveSubmit`
-  - `frontend/src/pages/UserManagement.jsx`（审批弹窗 JSX）
-
-#### ⑤ 角色体系调整：`important_admin → archive`（**此前会话改动**）
-- **改动**：
-  - `backend/app/models.py:UserRole` 移除 `important_admin`，新增 `archive = "档案管理（只读）"`。
-  - 前端 `UserManagement.jsx` 同步：`isImportantAdmin → isArchive`；`ROLE_MAP/ROLE_BADGE` 新增 `archive` 配色（琥珀色 `bg-amber-100 text-amber-700`）。
-  - 前端 `Projects.jsx` 增加 `isArchive = role === 'archive'` 分支，仅显示「查看」按钮。
-  - 清理 `ProjectForm.jsx` 中残留的 `important_admin` 判断，统一为 `admin`。
-
-#### ⑥ 项目列表多维筛选 + 序号列（**此前会话改动**）
-- **改动**：`frontend/src/pages/Projects.jsx`
-  - 筛选新增「中标状态 / 金额(万元) 区间 / 填报日期」三个维度。
-  - 表格首列加「序号」列 `(page-1)*20 + idx + 1`。
-
----

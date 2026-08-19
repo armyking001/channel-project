@@ -74,6 +74,7 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
     is_sm: initial('is_sm', 'no'),
     win_bid_status: initial('win_bid_status', 'in_progress'),
     project_overview: initial('project_overview'),
+    storage_zone_id: initial('storage_zone_id') || 1,  // 默认走默认存储区域
   })
 
   const [errors, setErrors] = useState({})
@@ -170,10 +171,16 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
         return
       }
       try {
-        // 1. 获取预览路径
+        // 1. 获取预览路径（自建项目需要传 source/storage_zone_id 让后端选择正确的 base_path）
+        // 编辑模式：使用 project 实际的 source/storage_zone_id
+        // 新建模式：默认 channel（渠道资料），用户也可以选择 self（自建项目，目前不暴露）
+        const previewExtra = {
+          source: project?.source || 'channel',
+          storage_zone_id: project?.storage_zone_id,
+        }
         const [resTender, resBid] = await Promise.all([
-          previewFileStoragePath({ project_name: form.project_name, folder_type: 'tender', responsible_sales: form.responsible_sales, ...creatorPayload }).catch(() => ({})),
-          previewFileStoragePath({ project_name: form.project_name, folder_type: 'bid', responsible_sales: form.responsible_sales, ...creatorPayload }).catch(() => ({})),
+          previewFileStoragePath({ project_name: form.project_name, folder_type: 'tender', responsible_sales: form.responsible_sales, ...creatorPayload, ...previewExtra }).catch(() => ({})),
+          previewFileStoragePath({ project_name: form.project_name, folder_type: 'bid', responsible_sales: form.responsible_sales, ...creatorPayload, ...previewExtra }).catch(() => ({})),
         ])
         if (isSubscribed) {
           setTenderPreview((resTender?.data ?? resTender)?.tender_folder || (resTender?.data ?? resTender)?.path || '')
@@ -484,9 +491,9 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
   }
 
   return (
-    <div className="w-[1100px] max-w-[95vw] bg-white">
+    <div className="w-full bg-white">
       {/* 顶部标题栏 */}
-      <div className="flex items-center justify-between px-8 py-5 border-b bg-gradient-to-r from-blue-50 to-white">
+      <div className="flex items-center justify-between pb-4 mb-4 border-b">
         <h3 className="text-xl font-bold text-gray-800">
           {readOnly ? '查看项目详情' :
             (withdrawMode ? '撤回修改' :
@@ -507,7 +514,7 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
         <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">×</button>
       </div>
 
-      <form onSubmit={handleSubmit} className="px-8 py-6">
+      <form onSubmit={handleSubmit}>
 
         {/* 编辑模式：展示项目摘要 + 文件管理 */}
         {isEdit && (

@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
-import { getProjects, deleteProject, submitProject, approveProject, rejectProject, withdrawProject } from '../api'
+import { getProjects, deleteProject, submitProject, approveProject, rejectProject, withdrawProject, getFormTemplates } from '../api'
 import { useAuthStore } from '../stores/auth'
 import ProjectForm from '../components/ProjectForm'
+import DynamicForm from '../components/DynamicForm'
 import dayjs from 'dayjs'
 import utc from 'dayjs/plugin/utc'
 import timezone from 'dayjs/plugin/timezone'
@@ -26,13 +27,39 @@ export default function Projects() {
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(false)
-  const [filters, setFilters] = useState({ project_name: '', partner_company: '', approval_status: '', win_bid_status: '', start_date: '', end_date: '', min_amount: '', max_amount: '' })
+  const [filters, setFilters] = useState({ project_name: '', partner_company: '', approval_status: '', win_bid_status: '', start_date: '', end_date: '', min_amount: '', max_amount: '', source: '' })
   const [showForm, setShowForm] = useState(false)
   const [showViewForm, setShowViewForm] = useState(false)
   const [editData, setEditData] = useState(null)
   const [selectedProject, setSelectedProject] = useState(null)
   const [showApproveModal, setShowApproveModal] = useState(false)
   const [approveComment, setApproveComment] = useState('')
+  const [selfFormTemplate, setSelfFormTemplate] = useState(null)  // 自建项目表单模板
+  const [showSelfForm, setShowSelfForm] = useState(false)  // 自建项目表单弹窗
+
+  // 加载自建项目表单模板
+  const loadSelfFormTemplate = async () => {
+    try {
+      const res = await getFormTemplates()
+      // 兼容旧模板名"自建项目"和新名"自营项目"
+      const tpl = res.data.find(t => t.name.includes('自建项目') || t.name.includes('自营项目'))
+      if (tpl) {
+        setSelfFormTemplate(tpl)
+        return tpl
+      } else {
+        alert('未找到"自营项目登记表"模板，请先在表单管理中创建名称包含"自营项目"的表单模板')
+        return null
+      }
+    } catch (e) {
+      alert('加载表单模板失败: ' + (e.response?.data?.detail || e.message))
+      return null
+    }
+  }
+
+  const handleSelfFormNew = async () => {
+    const tpl = await loadSelfFormTemplate()
+    if (tpl) setShowSelfForm(true)
+  }
 
   const fetchProjects = async () => {
     setLoading(true)
@@ -105,16 +132,33 @@ export default function Projects() {
     <div>
       <div className="flex justify-between items-center mb-6">
         <h2 className="text-2xl font-bold text-gray-800">项目列表</h2>
-        <button
-          onClick={() => { setEditData(null); setShowForm(true) }}
-          className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 transition"
-        >
-          新建项目
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={handleSelfFormNew}
+            className="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 transition text-sm"
+          >
+            自营项目新建
+          </button>
+          <button
+            onClick={() => { setEditData(null); setShowForm(true) }}
+            className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 transition text-sm"
+          >
+            渠道项目新建
+          </button>
+        </div>
       </div>
 
       {/* 筛选 */}
       <div className="bg-white p-4 rounded shadow mb-4 flex gap-4 flex-wrap">
+        <select
+          value={filters.source}
+          onChange={(e) => { setFilters(f => ({ ...f, source: e.target.value })); setPage(1) }}
+          className="px-3 py-2 border rounded w-32"
+        >
+          <option value="">项目类型</option>
+          <option value="channel">渠道项目</option>
+          <option value="self">自营项目</option>
+        </select>
         <input
           placeholder="项目名称"
           value={filters.project_name}
@@ -192,6 +236,7 @@ export default function Projects() {
             <tr>
               <th className="px-4 py-3 text-left whitespace-nowrap">序号</th>
               <th className="px-4 py-3 text-left">项目名称</th>
+              <th className="px-4 py-3 text-left">项目类型</th>
               <th className="px-4 py-3 text-left">编号</th>
               <th className="px-4 py-3 text-left">合作单位</th>
               <th className="px-4 py-3 text-left">金额(万元)</th>
@@ -204,13 +249,20 @@ export default function Projects() {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={10} className="text-center py-8 text-gray-400">加载中...</td></tr>
+              <tr><td colSpan={11} className="text-center py-8 text-gray-400">加载中...</td></tr>
             ) : projects.length === 0 ? (
-              <tr><td colSpan={10} className="text-center py-8 text-gray-400">暂无数据</td></tr>
+              <tr><td colSpan={11} className="text-center py-8 text-gray-400">暂无数据</td></tr>
             ) : projects.map((p, idx) => (
               <tr key={p.id} className="border-b hover:bg-gray-50">
                 <td className="px-4 py-3 text-gray-500 whitespace-nowrap">{(page - 1) * 20 + idx + 1}</td>
                 <td className="px-4 py-3 font-medium">{p.project_name}</td>
+                <td className="px-4 py-3">
+                  {p.source === 'self' ? (
+                    <span className="px-2 py-0.5 rounded text-xs bg-emerald-100 text-emerald-700">自营项目</span>
+                  ) : (
+                    <span className="px-2 py-0.5 rounded text-xs bg-blue-100 text-blue-700">渠道项目</span>
+                  )}
+                </td>
                 <td className="px-4 py-3 text-gray-500">{p.project_code}</td>
                 <td className="px-4 py-3">{p.partner_company}</td>
                 <td className="px-4 py-3 text-right">{p.project_amount != null ? ((p.project_amount / 10000).toLocaleString(undefined, {maximumFractionDigits: 2})) : '-'}</td>
@@ -296,7 +348,7 @@ export default function Projects() {
       {/* 编辑表单弹窗 */}
       {showForm && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg shadow-2xl max-h-[92vh] overflow-auto">
+          <div className="bg-white rounded-lg shadow-2xl max-h-[92vh] overflow-auto w-[1100px] max-w-[95vw] p-6">
             <ProjectForm
               project={editData}
               withdrawMode={
@@ -317,12 +369,25 @@ export default function Projects() {
       {/* 查看表单弹窗（只读模式） */}
       {showViewForm && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg shadow-2xl max-h-[92vh] overflow-auto">
+          <div className="bg-white rounded-lg shadow-2xl max-h-[92vh] overflow-auto w-[1100px] max-w-[95vw] p-6">
             <ProjectForm
               project={editData}
               readOnly={true}
               onClose={() => setShowViewForm(false)}
               onSaved={() => { setShowViewForm(false); fetchProjects() }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* 自建项目表单弹窗 */}
+      {showSelfForm && selfFormTemplate && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-2xl max-h-[92vh] overflow-auto w-[1100px] max-w-[95vw] p-6">
+            <DynamicForm
+              template={selfFormTemplate}
+              onClose={() => setShowSelfForm(false)}
+              onSubmitted={() => { setShowSelfForm(false); fetchProjects() }}
             />
           </div>
         </div>

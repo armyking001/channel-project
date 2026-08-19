@@ -171,27 +171,58 @@ def preview_path(
 ):
     """预览项目路径（不实际建）
     若前端传入 creator_username/creator_real_name（编辑模式下使用真实创建者），则用之；否则用当前用户
+    自建项目（source=self）按 storage_zone_id 找 StorageZone，否则用 FileStorageConfig
     """
-    cfg = _ensure_config(db)
+    from app.models import Project, User, StorageZone
+    from datetime import datetime as _dt
+
     username = data.creator_username or _user.username
     real_name = data.creator_real_name or _user.real_name
     # 如果前端没传 creator_*，则从数据库反查真实创建者
     if not data.creator_username or not data.creator_real_name:
         try:
-            from app.models import Project
             proj = db.query(Project).filter(Project.project_name == data.project_name).first()
             if proj and proj.created_by:
-                from app.models import User
                 owner = db.query(User).filter(User.id == proj.created_by).first()
                 if owner:
                     username = owner.username
                     real_name = owner.real_name
         except Exception:
             pass
-    root = render_project_root(cfg, username, real_name, data.project_name, data.responsible_sales)
+
+    # 决定使用的配置对象
+    cfg_obj = None  # FileStorageConfig 兼容对象
+    if data.source == 'self' or data.storage_zone_id:
+        # 自建项目：按 storage_zone_id 找 zone
+        zid = data.storage_zone_id
+        if not zid:
+            # 兜底：从 project 反查
+            try:
+                proj = db.query(Project).filter(Project.project_name == data.project_name).first()
+                zid = proj.storage_zone_id if proj else None
+            except Exception:
+                zid = None
+        zone = db.query(StorageZone).filter(StorageZone.id == zid).first() if zid else None
+        if zone:
+            cfg_obj = FileStorageConfig(
+                id=9999 + zone.id,
+                mode=zone.mode,
+                webdav_url=zone.webdav_url,
+                webdav_port=zone.webdav_port,
+                webdav_username=zone.webdav_username,
+                webdav_password=zone.webdav_password,
+                webdav_base_path=zone.webdav_base_path,
+                webdav_use_ssl=zone.webdav_use_ssl,
+                local_path=zone.local_path,
+                template='{responsible_sales}+{project_name}+{date}',
+            )
+
+    if cfg_obj is None:
+        cfg_obj = _ensure_config(db)
+
+    root = render_project_root(cfg_obj, username, real_name, data.project_name, data.responsible_sales)
     tender = render_subfolder(root, '招标资料')
     bid = render_subfolder(root, '投标文档')
-    # 注意：不再回退到 existing_*_folder 旧值——保证责任销售等字段变动时预览实时跟随
     return PathPreviewResponse(
         base_folder=root,
         tender_folder=tender,

@@ -92,6 +92,57 @@ def render_subfolder(root: str, sub: str) -> str:
     return os.path.join(root, sub).replace('/', os.sep)
 
 
+# ----- 基于 StorageZone 的路径渲染（推荐使用） -----
+def render_zone_root(zone, username: str, real_name: str,
+                     project_name: str,
+                     responsible_sales: Optional[str] = None,
+                     created_at: Optional[datetime.datetime] = None) -> str:
+    """基于 StorageZone 渲染项目根目录
+
+    路径结构:
+      local:  {local_path}/{sub_path?}/{模板渲染的文件夹名}
+      webdav: {scheme}://{host}[:port]/{base_path}/{sub_path?}/{模板渲染的文件夹名}
+    """
+    created_at = created_at or datetime.datetime.now()
+    # 使用 file_storage_config.template 兼容路径渲染
+    template = '{responsible_sales}+{project_name}+{date}'
+    folder = template.format(
+        username=_sanitize(username),
+        real_name=_sanitize(real_name),
+        responsible_sales=_sanitize(responsible_sales.strip() if (responsible_sales and responsible_sales.strip()) else real_name),
+        project_name=_sanitize(project_name),
+        date=created_at.strftime('%Y-%m-%d'),
+    )
+
+    sub_path = (zone.sub_path or '').strip('/').strip()
+
+    if zone.mode == StorageMode.local:
+        base = (zone.local_path or '').rstrip('\\/') or '.'
+        if sub_path:
+            return os.path.join(base, sub_path, folder).replace('/', os.sep)
+        return os.path.join(base, folder).replace('/', os.sep)
+
+    # webdav
+    host = (zone.webdav_url or '').strip()
+    scheme = 'https' if zone.webdav_use_ssl else 'http'
+    if host.startswith('http://'):
+        host = host[len('http://'):]; scheme = 'http'
+    elif host.startswith('https://'):
+        host = host[len('https://'):]; scheme = 'https'
+    host = host.rstrip('/')
+    host_part = f'{scheme}://{host}'
+    if zone.webdav_port:
+        host_part += f':{zone.webdav_port}'
+    base_path = (zone.webdav_base_path or '').strip('/')
+    parts = [host_part]
+    if base_path:
+        parts.append(base_path)
+    if sub_path:
+        parts.append(sub_path)
+    parts.append(folder)
+    return '/'.join(parts)
+
+
 # ----- 模式：local -----
 def ensure_local_folders(paths: list) -> Tuple[bool, str]:
     """本地模式：递归创建目录"""
@@ -137,6 +188,44 @@ def webdav_request(method: str, url: str, username: str, password: str,
         return False, f'连接失败: {e}'
     except Exception as e:
         return False, f'请求失败: {e}'
+
+
+def _test_webdav_connection(base_url: str, port: int = None, use_ssl: bool = True,
+                             username: str = '', password: str = '', base_path: str = '') -> Tuple[bool, str]:
+    """测试 WebDAV 连接（列出根目录）"""
+    if not base_url:
+        return False, '缺少 webdav_url'
+    scheme = 'https' if use_ssl else 'http'
+    host = base_url.replace('http://', '').replace('https://', '').rstrip('/')
+    url = f'{scheme}://{host}'
+    if port:
+        url += f':{port}'
+    if base_path:
+        url += '/' + base_path.strip('/')
+    ok, msg = webdav_request('PROPFIND', url, username, password, depth='1')
+    if ok:
+        return True, '连接成功'
+    return False, msg
+
+
+def _test_local_connection(local_path: str) -> Tuple[bool, str]:
+    """测试本地路径是否可访问"""
+    if not local_path:
+        return False, '缺少 local_path'
+    import os
+    if not os.path.exists(local_path):
+        return False, f'路径不存在: {local_path}'
+    if not os.path.isdir(local_path):
+        return False, f'不是一个目录: {local_path}'
+    # 试写
+    test_file = os.path.join(local_path, '.write_test')
+    try:
+        with open(test_file, 'w') as f:
+            f.write('test')
+        os.remove(test_file)
+        return True, '读写测试通过'
+    except OSError as e:
+        return False, f'写入失败: {e}'
 
 
 def ensure_webdav_folders(root_url: str, subfolders: list,

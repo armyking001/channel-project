@@ -85,4 +85,37 @@ export const exportProjects = (params) => api.get('/export/projects', { params, 
 export const getAuditLogs = (params) => api.get('/audit', { params })
 export const exportAuditLogs = (params) => api.get('/audit/export', { params, responseType: 'blob' })
 
+// 表单生成器
+export const getFormTemplates = () => api.get('/forms/templates')
+export const getFormTemplate = (id) => api.get(`/forms/templates/${id}`)
+export const createFormTemplate = (data) => api.post('/forms/templates', data)
+export const updateFormTemplate = (id, data) => api.put(`/forms/templates/${id}`, data)
+export const deleteFormTemplate = (id) => api.delete(`/forms/templates/${id}`)
+export const getFormInstances = (params) => api.get('/forms/instances', { params })
+export const createFormInstance = (data) => api.post('/forms/instances', data)
+export const getFormInstance = (id) => api.get(`/forms/instances/${id}`)
+export const deleteFormInstance = (id) => api.delete(`/forms/instances/${id}`)
+
+// ============ 存储区域 ============
+export const listStorageZones = () => api.get('/storage-zones')
+export const getStorageZone = (id) => api.get(`/storage-zones/${id}`)
+export const createStorageZone = (data) => api.post('/storage-zones', data)
+export const updateStorageZone = (id, data) => api.put(`/storage-zones/${id}`, data)
+export const deleteStorageZone = (id) => api.delete(`/storage-zones/${id}`)
+export const testStorageZoneConnection = (id) => api.post(`/storage-zones/${id}/test-connection`)
+export const revealStorageZonePassword = (id) => api.get(`/storage-zones/${id}/reveal-password`)
+
+export const initFormFolders = (data) => api.post('/forms/file-storage/init-folders', data)
+export const listFormFiles = (data) => api.post('/forms/file-storage/list-files', data)
+export const uploadFormFiles = (instanceId, folderType, files) => {
+  const fd = new FormData()
+  fd.append('instance_id', instanceId)
+  fd.append('folder_type', folderType)
+  files.forEach(f => fd.append('files', f))
+  return api.post('/forms/file-storage/upload', fd, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+}
+export const deleteFormFile = (data) => api.post('/forms/file-storage/delete-file', data)
+
 export default api

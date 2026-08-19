@@ -68,7 +68,7 @@ export default function Login() {
           <img src="/admin/logo_login.png?v=20260801" alt="深捷科技"
                style={{ width: '128px', height: '68px', transform: 'translateY(-2px)' }}
                className="object-contain flex-shrink-0" />
-          <h1 className="text-[29px] font-bold text-gray-800 whitespace-nowrap">渠道项目管理系统</h1>
+          <h1 className="text-[29px] font-bold text-gray-800 whitespace-nowrap">项目管理系统V2.0</h1>
         </div>
         {error && <div className="bg-red-50 text-red-600 p-3 rounded mb-4 text-sm">{error}</div>}
         <form onSubmit={handleSubmit}>

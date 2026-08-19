@@ -5,7 +5,7 @@ from typing import List, Optional
 import logging
 import traceback
 from app.database import get_db
-from app.models import User, UserRole, Project, ApprovalLog, ApprovalStatus, ApprovalAction, FileStorageConfig, StorageMode, AuditAction
+from app.models import User, UserRole, Project, ApprovalLog, ApprovalStatus, ApprovalAction, FileStorageConfig, StorageMode, StorageZone, AuditAction
 from app.schemas import (
     ProjectCreate, ProjectUpdate, ProjectResponse, ProjectListResponse,
     ApprovalRequest, ApprovalLogResponse, MessageResponse
@@ -60,6 +60,8 @@ def build_project_query(db: Session, current_user: User, filters: dict):
         q = q.filter(Project.project_amount >= float(filters["min_amount"]) * 10000)
     if filters.get("max_amount") is not None:
         q = q.filter(Project.project_amount <= float(filters["max_amount"]) * 10000)
+    if filters.get("source"):
+        q = q.filter(Project.source == filters["source"])
     return q
 
 @router.get("", response_model=ProjectListResponse)
@@ -74,6 +76,7 @@ def list_projects(
     end_date: Optional[str] = None,
     min_amount: Optional[float] = None,
     max_amount: Optional[float] = None,
+    source: Optional[str] = None,  # channel=渠道项目 / self=自建项目
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -86,6 +89,7 @@ def list_projects(
         "end_date": end_date,
         "min_amount": min_amount,
         "max_amount": max_amount,
+        "source": source,
     }
     q = build_project_query(db, current_user, filters)
     # 关联加载 creator/approver（前端编辑项目时需要 creator.username/real_name 拼出文件路径）

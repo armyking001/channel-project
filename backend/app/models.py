@@ -13,9 +13,8 @@ class StorageMode(str, enum.Enum):
 
 
 class FileStorageConfig(Base):
-    """文件存储配置（单例 id=1）
-    - local: local_path 形如 D:\\项目文件\\渠道项目
-    - webdav: base_url + username + password + base_path (远程子目录)
+    """文件存储配置（单例 id=1）— 已废弃，仅保留兼容旧代码
+    新代码请使用 StorageZone
     """
     __tablename__ = 'file_storage_config'
 
@@ -29,6 +28,34 @@ class FileStorageConfig(Base):
     webdav_password = Column(String(200), nullable=True)
     webdav_base_path = Column(String(500), nullable=True)
     template = Column(String(200), default='{responsible_sales}+{project_name}+{date}', nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class StorageZone(Base):
+    """存储区域 — 用户自定义的文件存储位置（本地或 WebDAV）
+
+    - mode=local:  local_path = D:\\项目文件\\渠道项目
+    - mode=webdav: 远程 NAS (url + username + password + base_path)
+    - 命名唯一：用户可创建多个区域（如「172nas」「测试资质」），项目使用 zone_id 关联
+    - sub_path: 该区域下存放指定表单/项目的子路径（如「自建项目」「渠道项目」）
+    """
+    __tablename__ = 'storage_zones'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False, unique=True)  # 区域名（唯一）
+    mode = Column(Enum(StorageMode), default=StorageMode.webdav, nullable=False)
+    local_path = Column(String(500), nullable=True)  # 本地磁盘路径
+    webdav_url = Column(String(500), nullable=True)
+    webdav_port = Column(Integer, nullable=True)
+    webdav_use_ssl = Column(Boolean, default=True, nullable=False)
+    webdav_username = Column(String(100), nullable=True)
+    webdav_password = Column(String(200), nullable=True)
+    webdav_base_path = Column(String(500), nullable=True)  # 起始路径
+    sub_path = Column(String(200), nullable=True)  # 区域下的子路径
+    description = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True)
+    sort_order = Column(Integer, default=0)  # 显示排序
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 class UserRole(str, enum.Enum):
@@ -106,6 +133,8 @@ class Project(Base):
     project_name = Column(String(200), nullable=False)
     project_code = Column(String(50), nullable=True, unique=True)
     project_type = Column(Enum(ProjectType, values_callable=lambda x: [e.value for e in x]), default=ProjectType.other, nullable=False)
+    source = Column(String(20), nullable=True, default='channel')  # channel=渠道项目 / self=自建项目（来自 form_instance）
+    form_instance_id = Column(Integer, ForeignKey("form_instances.id"), nullable=True)
     tender_time = Column(Date, nullable=True)
     bid_time = Column(Date, nullable=True)
     owner_contact_person = Column(String(100), nullable=True)
@@ -130,6 +159,7 @@ class Project(Base):
     tender_folder = Column(String(500), nullable=True)
     bid_folder = Column(String(500), nullable=True)
     responsible_sales = Column(String(100), nullable=True)  # 责任销售（用于命名项目文件夹，留空则用创建者姓名）
+    storage_zone_id = Column(Integer, ForeignKey("storage_zones.id"), nullable=True)  # 使用的存储区域
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     approver_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     approval_status = Column(Enum(ApprovalStatus), default=ApprovalStatus.pending_submit)
@@ -139,6 +169,7 @@ class Project(Base):
     # 关联
     creator = relationship("User", back_populates="projects_created", foreign_keys=[created_by])
     approver = relationship("User", back_populates="projects_approved", foreign_keys=[approver_id])
+    storage_zone = relationship("StorageZone", foreign_keys=[storage_zone_id])
     approval_logs = relationship("ApprovalLog", back_populates="project", cascade="all, delete-orphan")
 
 class ApprovalLog(Base):
@@ -198,3 +229,45 @@ class AuditLog(Base):
     details = Column(Text, nullable=True)
     ip_address = Column(String(45), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class FormTemplate(Base):
+    """表单模板 — 管理员通过表单生成器设计的表单定义"""
+    __tablename__ = "form_templates"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    name = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+    fields = Column(Text, nullable=False, default='[]')  # JSON: [{type, label, key, required, ...}]
+    storage_sub_path = Column(String(200), nullable=True)  # 兼容旧字段（已弃用，新代码使用 storage_zone_id）
+    storage_zone_id = Column(Integer, ForeignKey("storage_zones.id"), nullable=True)  # 关联的存储区域
+    is_active = Column(Boolean, default=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    creator = relationship("User", foreign_keys=[created_by])
+    storage_zone = relationship("StorageZone", foreign_keys=[storage_zone_id])
+    instances = relationship("FormInstance", back_populates="template", cascade="all, delete-orphan")
+
+
+class FormInstance(Base):
+    """表单实例 — 用户根据模板提交的表单数据"""
+    __tablename__ = "form_instances"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    template_id = Column(Integer, ForeignKey("form_templates.id"), nullable=False)
+    data = Column(Text, nullable=False, default='{}')
+    tender_folder = Column(String(500), nullable=True)
+    bid_folder = Column(String(500), nullable=True)
+    storage_zone_id = Column(Integer, ForeignKey("storage_zones.id"), nullable=True)
+    approver_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approval_status = Column(Enum(ApprovalStatus), default=ApprovalStatus.pending_submit)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    template = relationship("FormTemplate", back_populates="instances")
+    creator = relationship("User", foreign_keys=[created_by])
+    approver = relationship("User", foreign_keys=[approver_id])
+    storage_zone = relationship("StorageZone", foreign_keys=[storage_zone_id])
