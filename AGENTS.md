@@ -413,7 +413,7 @@ if existing:
 
 ---
 
-## 7. 跟单表聚合/历史/导出优化（2026-08-20）
+## 13. 跟单表聚合/历史/导出优化（2026-08-20）
 
 ### ① 时间轴弹窗显示所有模板字段（含自定义）✅
 
@@ -472,4 +472,28 @@ if existing:
 - **测试**：
   - `POST /api/project-followups` → 服务端日志 `[followup_storage] create id=18 -> True: 已保存到 WebDAV: https://172.16.10.252:5006/自营资料/跟单资料/1-自营项目新建1/18.json`
   - `PUT /api/project-followups/18` → `[followup_storage] edit id=19 -> True: 已保存到 WebDAV: https://...19.json`
+
+---
+
+## 14. UI 细节微调（2026-08-20）
+
+### ① 系统名 + 菜单顺序调整 ✅
+
+- **需求**：左侧菜单中「审计记录」与「表单管理」位置互换；系统名「项目管理系统」→「**销售项目管理系统**」
+- **实现**：
+  - [Layout.jsx:113-121](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/Layout.jsx#L113-L121) 菜单项顺序：表单管理 → 审计记录
+  - [Layout.jsx:83](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/Layout.jsx#L83) 侧栏标题
+  - [Login.jsx:65-71](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/Login.jsx#L65-L71) 登录页标题 + 卡片宽度 480→**560px** + logo 128→140
+  - [index.html:6](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/index.html#L6) 浏览器 tab 标题
+  - [main.py:475](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/main.py#L475) FastAPI title
+- **部署**：增量部署 `17c2076` ✓
+
+### ② 移除「+ 添加字段」功能 + 侧栏标题不换行 ✅
+
+- **需求**：跟单弹窗底部的「+ 添加字段」按钮不要；侧栏「V2.0」不要换行
+- **实现**：
+  - [ProjectFollowups.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/ProjectFollowups.jsx) 删除按钮、UI 区块、`useState`、`addExtraField`、`removeExtraField`
+  - [Layout.jsx:79,83](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/Layout.jsx#L79) Logo `h-10`→`h-8`，h1 加 `whitespace-nowrap`
+- **Bug 修复**：上次删除 `extraFields` state 时漏删 2 处调用 `setExtraFields([])`（openCreate/openEdit），导致点击编辑按钮打不开弹窗。已彻底清理。
+- **部署**：增量部署 `8fc787f` ✓
 
