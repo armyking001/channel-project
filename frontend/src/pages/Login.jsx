@@ -62,13 +62,13 @@ export default function Login() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-100">
-      <div className="relative bg-white p-8 rounded-lg shadow-md w-[480px] pb-12">
+      <div className="relative bg-white p-10 rounded-lg shadow-md w-[560px] pb-12">
         {/* 顶部 Logo + 标题 */}
         <div className="flex items-center justify-center mb-6 gap-4">
           <img src="/admin/logo_login.png?v=20260801" alt="深捷科技"
-               style={{ width: '128px', height: '68px', transform: 'translateY(-2px)' }}
+               style={{ width: '140px', height: '76px', transform: 'translateY(-2px)' }}
                className="object-contain flex-shrink-0" />
-          <h1 className="text-[29px] font-bold text-gray-800 whitespace-nowrap">项目管理系统V2.0</h1>
+          <h1 className="text-[29px] font-bold text-gray-800 whitespace-nowrap">销售项目管理系统V2.0</h1>
         </div>
         {error && <div className="bg-red-50 text-red-600 p-3 rounded mb-4 text-sm">{error}</div>}
         <form onSubmit={handleSubmit}>

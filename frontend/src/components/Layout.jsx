@@ -80,7 +80,7 @@ export default function Layout() {
             draggable={false}
           />
           <div className="min-w-0 flex-1">
-            <h1 className="text-sm font-bold leading-tight">项目管理系统V2.0</h1>
+            <h1 className="text-sm font-bold leading-tight">销售项目管理系统V2.0</h1>
             <p className="text-xs text-gray-400 mt-0.5 truncate">{user?.real_name} · {roleLabel[user?.role] || ''}</p>
           </div>
         </div>
@@ -110,13 +110,13 @@ export default function Layout() {
             </Link>
           )}
           {isAdmin && (
-            <Link to="/admin/audit" className="block px-4 py-2 rounded hover:bg-gray-700 transition">
-              📜 审计记录
+            <Link to="/admin/forms" className="block px-4 py-2 rounded hover:bg-gray-700 transition">
+              📐 表单管理
             </Link>
           )}
           {isAdmin && (
-            <Link to="/admin/forms" className="block px-4 py-2 rounded hover:bg-gray-700 transition">
-              📐 表单管理
+            <Link to="/admin/audit" className="block px-4 py-2 rounded hover:bg-gray-700 transition">
+              📜 审计记录
             </Link>
           )}
         </nav>

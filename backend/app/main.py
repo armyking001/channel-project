@@ -473,7 +473,7 @@ async def lifespan(app: FastAPI):
     engine.dispose()
 
 app = FastAPI(
-    title="项目管理系统V2.0",
+    title="销售项目管理系统V2.0",
     version="2.0.0",
     lifespan=lifespan
 )
