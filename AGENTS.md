@@ -497,3 +497,110 @@ if existing:
 - **Bug 修复**：上次删除 `extraFields` state 时漏删 2 处调用 `setExtraFields([])`（openCreate/openEdit），导致点击编辑按钮打不开弹窗。已彻底清理。
 - **部署**：增量部署 `8fc787f` ✓
 
+---
+
+## 15. 档案管理账号隐藏项目跟单（2026-08-20）
+
+### 需求
+
+档案管理（`archive` 角色）账号**前台**不可见项目跟单（菜单 + 页面 + 直链 URL），但**后台 API 保留**（后续看情况再启用扩展）。
+
+### 三层隐藏实现
+
+| 层 | 文件 | 实现 |
+|---|---|---|
+| ① 侧栏菜单 | [frontend/src/components/Layout.jsx:96-100](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/Layout.jsx#L96-L100) | `项目跟单` 菜单项加 `!isArchive` 条件渲染 |
+| ② 路由守卫 | [frontend/src/App.jsx:21-28,39](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/App.jsx#L21-L28) | 新增 `ArchiveGuard` 组件，archive 访问 `/project-followups` 自动 `<Navigate to="/projects" replace />` |
+| ③ 项目列表 | [frontend/src/pages/Projects.jsx:302-306](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/Projects.jsx#L302-L306) | 操作列对 archive 只显示"查看"按钮（原有逻辑，列表无跟单列） |
+
+### 后端 API 完全保留
+
+- ❌ **未修改** [backend/app/routers/project_followups.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/project_followups.py) 任何权限代码
+- ✅ 所有 `/api/project-followups/*` 接口对 archive 仍可访问（数据可读可写，留给未来扩展）
+- ✅ 第 12 章权限矩阵中 `archive` 行的"列表可见：全部（只读）"继续保持有效
+
+### 部署
+
+- 增量部署 `a40d57c` ✓
+- GitHub 已同步 `17c2076..a40d57d main -> main`
+
+---
+
+## 16. 数据同步：本地表单配置同步到服务端（2026-08-20）
+
+### 需求
+
+本地 3 个表单模板 + 3 个存储区域 + 4 个表单记录 → 服务端数据库需与本地完全一致。
+
+### 同步范围
+
+| 表 | 数量 | 说明 |
+|---|---|---|
+| `storage_zones` | 3 | 172NAS/渠道资料、172NAS/自营资料、172NAS/跟单存储 |
+| `form_templates` | 3 | 渠道项目登记表（22字段）、自营项目登记表（19字段）、项目跟单登记表（5字段） |
+| `form_instances` | 4 | 4 条已填写的自建项目记录 |
+| `users` / `projects` / `approval_logs` / `audit_logs` | 不变 | 保留服务端原有数据 |
+
+### 同步方法
+
+1. **`dump_local.py`**：导出本地 SQLite 表为 SQL INSERT 语句（保留本地自增 ID）
+2. **SCP 上传**到服务器 `/tmp/sync.sql`
+3. **SQLite3 命令行应用**：`sqlite3 data.db < sync.sql`
+4. **修复 `sqlite_sequence`**：让 AUTOINCREMENT 从本地最大 ID + 1 开始（避免主键冲突）
+5. **外键完整性校验**：所有引用均有效，无孤儿数据
+
+### 安全保证
+
+- ✅ 同步前自动备份 `/opt/channel-project-data-backup-20260820163504/`
+- ✅ 未触碰 `users` / `projects` / `approval_logs` / `audit_logs`（生产数据零影响）
+- ✅ 操作可回滚（备份命令记录在 deploy 日志）
+
+### 关键文件
+
+- 同步脚本：[deploy/dump_local.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/deploy/dump_local.py)
+- 同步 SQL：`C:/Users/jwang/AppData/Local/Temp/sync.sql`（一次性产物，未入仓）
+
+---
+
+## 17. 用户手册：销售项目管理系统V2.0（2026-08-20）
+
+### 需求
+
+生成 Word 版本用户手册，覆盖「用户登录 → 申请 → 新建项目 → 跟单 → 审批」全流程，以普通账号和重要账号 2 个角色为例。
+
+### 文档信息
+
+| 项目 | 内容 |
+|---|---|
+| 文件名 | `销售项目管理系统V2.0_用户手册.docx` |
+| 大小 | 46.2 KB |
+| 章节数 | 7 章 + 封面 + 目录 + 附录 |
+| 角色覆盖 | 普通账号（刘建辉）+ 重要账号（罗隽） |
+
+### 文档结构
+
+| 章节 | 内容 |
+|---|---|
+| 一、概述 | 系统功能、4 种角色、访问地址、示例账号 |
+| 二、账号申请与登录 | 申请流程（4 步） + 登录流程（3 步） |
+| 三、系统主界面 | 左侧导航、顶部状态栏、工作区介绍 |
+| 四、普通账号流程 | 新建项目（9 步）→ 编辑 → 撤回 → 新建跟单 → 时间轴 |
+| 五、重要账号流程 | 待审批列表 → 通过 / 驳回 → 全局跟单 |
+| 六、查看报表 | 4 大统计报表 |
+| 七、附录 | 状态字段、跟单阶段、角色权限、FAQ |
+
+### 关键文件
+
+- 生成脚本：`C:\Users\jwang\AppData\Local\Temp\gen_manual.py`（一次性脚本）
+- 输出文件：
+  - 桌面原始：`C:\Users\jwang\Desktop\销售项目管理系统V2.0_用户手册.docx`
+  - 项目目录：`Z:\soft-RED\hermes\开发软件\渠道项目登记\销售项目管理系统V2.0_用户手册.docx`
+  - **仓库内**：`销售项目管理系统V2.0_用户手册.docx`（已 commit `a40d57c`）
+
+### 工具
+
+- **python-docx**：生成 .docx 文件
+- **set_cn_font**（'微软雅黑'）：保证 Word 中文显示美观
+- **步骤徽章 + 提示框 + 表格 Light Grid 样式**：可视化操作路径
+
+
