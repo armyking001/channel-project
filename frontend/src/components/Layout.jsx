@@ -93,9 +93,11 @@ export default function Layout() {
               ✅ 审批管理
             </Link>
           )}
-          <Link to="/project-followups" className="block px-4 py-2 rounded hover:bg-gray-700 transition">
-            📈 项目跟单
-          </Link>
+          {!isArchive && (
+            <Link to="/project-followups" className="block px-4 py-2 rounded hover:bg-gray-700 transition">
+              📈 项目跟单
+            </Link>
+          )}
           <Link to="/reports" className="block px-4 py-2 rounded hover:bg-gray-700 transition">
             📊 报表管理
           </Link>

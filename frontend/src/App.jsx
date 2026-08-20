@@ -18,6 +18,15 @@ function ProtectedRoute({ children }) {
   return user ? children : <Navigate to="/login" />
 }
 
+// 档案管理（archive）前台不可见的页面（保留后端 API 权限）
+function ArchiveGuard({ children }) {
+  const { user } = useAuthStore()
+  if (user?.role === 'archive') {
+    return <Navigate to="/projects" replace />
+  }
+  return children
+}
+
 function App() {
   return (
     <HashRouter>
@@ -27,7 +36,7 @@ function App() {
           <Route path="/" element={<Navigate to="/projects" replace />} />
           <Route path="/projects" element={<Projects />} />
           <Route path="/approvals" element={<Approvals />} />
-          <Route path="/project-followups" element={<ProjectFollowups />} />
+          <Route path="/project-followups" element={<ArchiveGuard><ProjectFollowups /></ArchiveGuard>} />
           <Route path="/reports" element={<Reports />} />
           <Route path="/file-storage" element={<StorageZones />} />
           <Route path="/admin/users" element={<UserManagement />} />
