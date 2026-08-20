@@ -86,3 +86,27 @@ SELF_PROJECT_TEMPLATE = {
 
 # 内置模板名集合（用于前端识别只读、禁止删除/停用）
 BUILTIN_TEMPLATE_NAMES = {CHANNEL_PROJECT_TEMPLATE['name'], SELF_PROJECT_TEMPLATE['name']}
+
+
+FOLLOWUP_TEMPLATE = {
+    'name': '项目跟单登记表',
+    'description': '项目跟单 / 项目汇报 表单（系统内置，与项目跟单的"新建跟单"完全一致）',
+    'storage_sub_path': '',
+    'storage_zone_id': None,  # 跟单不涉及文件存储
+    'fields': [
+        # — 区域 1: 基本信息 —
+        {'id': 'ff_1', 'type': 'text',     'label': '当前进展描述',     'key': 'progress',     'required': True,  'placeholder': '请输入当前进展', 'section': '基本信息'},
+        {'id': 'ff_2', 'type': 'textarea', 'label': '风险与所需支持', 'key': 'risks',        'required': False, 'placeholder': '选填', 'section': '基本信息'},
+        {'id': 'ff_3', 'type': 'textarea', 'label': '下一步计划',     'key': 'next_plan',    'required': False, 'placeholder': '选填', 'section': '基本信息'},
+
+        # — 区域 2: 后续跟进 —
+        {'id': 'ff_4', 'type': 'text',     'label': '下一步责任人',     'key': 'next_owner',         'required': False, 'placeholder': '选填', 'section': '后续跟进'},
+        {'id': 'ff_5', 'type': 'date',     'label': '下一步截止时间',   'key': 'next_deadline',      'required': False, 'section': '后续跟进'},
+
+        # — 区域 3: 预计指标 —
+        {'id': 'ff_6', 'type': 'number',   'label': '预计成交金额（万元）', 'key': 'expected_amount', 'required': False, 'placeholder': '0.00', 'section': '预计指标'},
+        {'id': 'ff_7', 'type': 'date',     'label': '预计签单日期',         'key': 'expected_sign_date', 'required': False, 'section': '预计指标'},
+    ],
+}
+
+BUILTIN_TEMPLATE_NAMES.add(FOLLOWUP_TEMPLATE['name'])

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import {
   getReportSummary, getReportTrend, getReportByPartner,
   getReportByCooperation, getReportByWinBid, exportReport,
+  getReportByFollowupStage,
 } from '../api'
 import { useAuthStore } from '../stores/auth'
 
@@ -29,6 +30,7 @@ export default function Reports() {
   const [partners, setPartners] = useState([])
   const [coop, setCoop] = useState([])
   const [winBid, setWinBid] = useState([])
+  const [followupByStage, setFollowupByStage] = useState([])
   const [loading, setLoading] = useState(false)
   const [exporting, setExporting] = useState(false)
 
@@ -44,18 +46,20 @@ export default function Reports() {
     setLoading(true)
     try {
       const p = params()
-      const [s, t, pp, cc, w] = await Promise.all([
+      const [s, t, pp, cc, w, f] = await Promise.all([
         getReportSummary(p),
         getReportTrend(p),
         getReportByPartner(p),
         getReportByCooperation(p),
         getReportByWinBid(p),
+        getReportByFollowupStage(),
       ])
       setSummary(s.data)
       setTrend(t.data)
       setPartners(pp.data)
       setCoop(cc.data)
       setWinBid(w.data)
+      setFollowupByStage(f.data)
     } catch (err) {
       console.error(err)
     } finally {
@@ -178,6 +182,22 @@ export default function Reports() {
             data={winBid.map(w => ({ label: w.label, value: w.count }))}
             colors={COLORS.slice(2)}
           />
+        </div>
+
+        {/* 项目跟单阶段 */}
+        <div className="bg-white rounded shadow p-4">
+          <h3 className="text-sm font-semibold text-gray-700 mb-3">项目跟单 — 各阶段项目数</h3>
+          <BarChart
+            data={followupByStage.map(s => ({ label: s.stage, value: s.count }))}
+            color="#3b82f6"
+          />
+          <div className="mt-3 text-xs text-gray-500">
+            {followupByStage.map(s => (
+              <span key={s.stage} className="inline-block mr-4">
+                {s.stage}：{s.count} 个 / 预计 {s.expected_amount?.toLocaleString()} 万
+              </span>
+            ))}
+          </div>
         </div>
 
         {/* Top 合作单位 */}

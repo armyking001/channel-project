@@ -17,10 +17,25 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401) {
-      localStorage.removeItem('token')
-      localStorage.removeItem('user')
-      window.location.href = '/login'
+    const status = error.response?.status
+    // 401: token 无效/过期；403 + 路径包含 admin 操作：登录态与权限不匹配，强制重登
+    const isAdminPath = (error.config?.url || '').match(
+      /\/(storage-zones|forms\/templates|users|admin)/
+    )
+    if (status === 401 || (status === 403 && isAdminPath)) {
+      // 避免死循环：登出页本身 / 登录页本身不要触发
+      const path = window.location.pathname
+      const onLoginPage = path === '/login' || path.startsWith('/login')
+      const currentToken = localStorage.getItem('token')
+      // 只有当前确实带 token 才清掉（防止登出请求后误清）
+      if (currentToken && !onLoginPage) {
+        console.warn(`[auth] ${status} on ${error.config?.url} -> force re-login`)
+        localStorage.removeItem('token')
+        localStorage.removeItem('user')
+        // 跳登录页并带上来源 url，便于登录后回跳
+        const ret = encodeURIComponent(window.location.pathname + window.location.search)
+        window.location.href = `/login?return=${ret}`
+      }
     }
     return Promise.reject(error)
   }
@@ -70,6 +85,19 @@ export const getReportByPartner = (params) => api.get('/reports/by-partner', { p
 export const getReportByCooperation = (params) => api.get('/reports/by-cooperation', { params })
 export const getReportByWinBid = (params) => api.get('/reports/by-win-bid', { params })
 export const exportReport = (params) => api.get('/reports/export', { params, responseType: 'blob' })
+export const getReportByFollowupStage = () => api.get('/reports/by-followup-stage')
+
+// 项目跟单
+export const getFollowupStageOptions = () => api.get('/project-followups/stage-options')
+export const getFollowupTemplate = () => api.get('/project-followups/template')
+export const getFollowableProjects = () => api.get('/project-followups/followable-projects')
+export const listFollowups = (params) => api.get('/project-followups', { params })
+export const exportFollowups = (params) => api.get('/project-followups/export', { params, responseType: 'blob' })
+export const getFollowupTimeline = (project_id) => api.get('/project-followups/timeline', { params: { project_id } })
+export const getFollowupSummary = () => api.get('/project-followups/summary')
+export const createFollowup = (data) => api.post('/project-followups', data)
+export const updateFollowup = (id, data) => api.put(`/project-followups/${id}`, data)
+export const deleteFollowup = (id) => api.delete(`/project-followups/${id}`)
 
 // 文件管理
 export const getFileStorageConfig = () => api.get('/file-storage/config')

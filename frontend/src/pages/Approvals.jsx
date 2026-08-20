@@ -28,7 +28,7 @@ export default function Approvals() {
   const [loading, setLoading] = useState(false)
   const [summary, setSummary] = useState({ pending: 0, history: 0, scope: 0 })
   const [filterName, setFilterName] = useState('')
-  const [filterPartner, setFilterPartner] = useState('')
+  const [filterSales, setFilterSales] = useState('')
   const [busyId, setBusyId] = useState(null)
 
   const canApprove = user?.role === 'admin' || user?.role === 'important'
@@ -46,7 +46,7 @@ export default function Approvals() {
     try {
       const params = { page, page_size: 20 }
       if (filterName) params.project_name = filterName
-      if (filterPartner) params.partner_company = filterPartner
+      if (filterSales) params.responsible_sales = filterSales
       const apiCall = tab === 'pending' ? getApprovalPending : getApprovalHistory
       const res = await apiCall(params)
       setItems(res.data.items)
@@ -60,7 +60,7 @@ export default function Approvals() {
 
   useEffect(() => { fetchSummary() }, [])
   useEffect(() => { setPage(1) }, [tab])
-  useEffect(() => { fetchList() }, [tab, page, filterName, filterPartner])
+  useEffect(() => { fetchList() }, [tab, page, filterName, filterSales])
 
   const handleApprove = async (id) => {
     if (!confirm('确认通过该项目？')) return
@@ -130,9 +130,9 @@ export default function Approvals() {
         />
         <input
           type="text"
-          placeholder="合作单位"
-          value={filterPartner}
-          onChange={e => { setPage(1); setFilterPartner(e.target.value) }}
+          placeholder="责任销售"
+          value={filterSales}
+          onChange={e => { setPage(1); setFilterSales(e.target.value) }}
           className="border rounded px-3 py-1.5 text-sm"
         />
       </div>
@@ -146,7 +146,7 @@ export default function Approvals() {
               <th className="px-3 py-2 text-left">项目名称</th>
               <th className="px-3 py-2 text-left">项目类型</th>
               <th className="px-3 py-2 text-left">编号</th>
-              <th className="px-3 py-2 text-left">合作单位</th>
+              <th className="px-3 py-2 text-left">责任销售</th>
               <th className="px-3 py-2 text-right">金额(元)</th>
               <th className="px-3 py-2 text-center">状态</th>
               <th className="px-3 py-2 text-left">创建人</th>
@@ -176,7 +176,7 @@ export default function Approvals() {
                     )}
                   </td>
                   <td className="px-3 py-2 font-mono text-xs">{p.project_code}</td>
-                  <td className="px-3 py-2">{p.partner_company}</td>
+                  <td className="px-3 py-2">{p.responsible_sales || '-'}</td>
                   <td className="px-3 py-2 text-right">{Number(p.project_amount).toLocaleString()}</td>
                   <td className="px-3 py-2 text-center">
                     <span className={`px-2 py-0.5 rounded text-xs ${st?.color}`}>{st?.label || p.approval_status}</span>

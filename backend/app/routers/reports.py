@@ -15,8 +15,10 @@ from sqlalchemy import or_, func
 from typing import Optional
 from app.database import get_db
 from app.models import (
-    User, UserRole, Project, ApprovalStatus, CooperationMode, WinBidStatus
+    User, UserRole, Project, ApprovalStatus, CooperationMode, WinBidStatus,
+    ProjectFollowup, FollowupStage,
 )
+from app.schemas import FOLLOWUP_STAGE_CHOICES
 from app.auth import get_current_user
 
 router = APIRouter(prefix="/api/reports", tags=["报表管理"])
@@ -183,6 +185,49 @@ def by_win_bid(
         }
         for s, c, a in rows
     ]
+
+
+@router.get("/by-followup-stage")
+def by_followup_stage(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """项目跟单 — 各阶段项目数 + 预计成交金额合计。
+
+    金额：每个项目只取最新一次跟单的 expected_amount 之和。
+    """
+    scoped = _scoped_query(db, current_user).subquery()
+    visible_proj_ids = db.query(scoped.c.id).subquery()
+
+    # 项目数（最新跟单在该阶段的项目数）
+    sub = db.query(
+        ProjectFollowup.project_id,
+        func.max(ProjectFollowup.created_at).label('mx'),
+    ).filter(
+        ProjectFollowup.project_id.in_(visible_proj_ids)
+    ).group_by(ProjectFollowup.project_id).subquery()
+
+    latest = db.query(ProjectFollowup).join(
+        sub,
+        (ProjectFollowup.project_id == sub.c.project_id) &
+        (ProjectFollowup.created_at == sub.c.mx),
+    ).all()
+
+    stat = {s: {"stage": s, "count": 0, "expected_amount": 0.0} for s in FOLLOWUP_STAGE_CHOICES}
+    for it in latest:
+        st = it.stage.value if hasattr(it.stage, 'value') else str(it.stage)
+        if st not in stat:
+            stat[st] = {"stage": st, "count": 0, "expected_amount": 0.0}
+        stat[st]["count"] += 1
+        stat[st]["expected_amount"] += float(it.expected_amount or 0)
+
+    # 阶段排序按定义顺序
+    result = []
+    for s in FOLLOWUP_STAGE_CHOICES:
+        d = stat[s]
+        d["expected_amount"] = round(d["expected_amount"], 2)
+        result.append(d)
+    return result
 
 
 @router.get("/export")

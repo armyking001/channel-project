@@ -27,7 +27,7 @@ export default function Projects() {
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(false)
-  const [filters, setFilters] = useState({ project_name: '', partner_company: '', approval_status: '', win_bid_status: '', start_date: '', end_date: '', min_amount: '', max_amount: '', source: '' })
+  const [filters, setFilters] = useState({ project_name: '', responsible_sales: '', approval_status: '', win_bid_status: '', start_date: '', end_date: '', min_amount: '', max_amount: '', source: '' })
   const [showForm, setShowForm] = useState(false)
   const [showViewForm, setShowViewForm] = useState(false)
   const [editData, setEditData] = useState(null)
@@ -166,9 +166,9 @@ export default function Projects() {
           className="px-3 py-2 border rounded w-48"
         />
         <input
-          placeholder="合作单位"
-          value={filters.partner_company}
-          onChange={(e) => { setFilters(f => ({ ...f, partner_company: e.target.value })); setPage(1) }}
+          placeholder="责任销售"
+          value={filters.responsible_sales}
+          onChange={(e) => { setFilters(f => ({ ...f, responsible_sales: e.target.value })); setPage(1) }}
           className="px-3 py-2 border rounded w-48"
         />
         <select
@@ -238,7 +238,7 @@ export default function Projects() {
               <th className="px-4 py-3 text-left">项目名称</th>
               <th className="px-4 py-3 text-left">项目类型</th>
               <th className="px-4 py-3 text-left">编号</th>
-              <th className="px-4 py-3 text-left">合作单位</th>
+              <th className="px-4 py-3 text-left">责任销售</th>
               <th className="px-4 py-3 text-left">金额(万元)</th>
               <th className="px-4 py-3 text-left">中标</th>
               <th className="px-4 py-3 text-left">状态</th>
@@ -264,7 +264,7 @@ export default function Projects() {
                   )}
                 </td>
                 <td className="px-4 py-3 text-gray-500">{p.project_code}</td>
-                <td className="px-4 py-3">{p.partner_company}</td>
+                <td className="px-4 py-3">{p.responsible_sales || '-'}</td>
                 <td className="px-4 py-3 text-right">{p.project_amount != null ? ((p.project_amount / 10000).toLocaleString(undefined, {maximumFractionDigits: 2})) : '-'}</td>
                 <td className="px-4 py-3">{WIN_MAP[p.win_bid_status] || '-'}</td>
                 <td className="px-4 py-3">

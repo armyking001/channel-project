@@ -226,7 +226,13 @@ function StorageZoneEditor({ zone, onClose, onSaved }) {
       alert('保存成功')
       onSaved()
     } catch (e) {
-      alert('保存失败: ' + (e.response?.data?.detail || e.message))
+      const status = e.response?.status
+      const detail = e.response?.data?.detail
+      if (status === 403 && /系统管理员|管理存储区域/.test(detail || '')) {
+        alert('保存失败：当前账号不是系统管理员或 token 已过期。\n请退出登录后重新登录「admin」账号。')
+      } else {
+        alert('保存失败: ' + (detail || e.message))
+      }
     } finally {
       setSaving(false)
     }

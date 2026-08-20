@@ -154,7 +154,44 @@ def ensure_local_folders(paths: list) -> Tuple[bool, str]:
         return False, f'本地目录创建失败: {e}'
 
 
+def write_local_file(file_path: str, content: bytes) -> Tuple[bool, str]:
+    """本地模式：写文件（自动创建父目录）"""
+    try:
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        with open(file_path, 'wb') as f:
+            f.write(content)
+        return True, f'已写入 {file_path}'
+    except Exception as e:
+        return False, f'本地写文件失败: {e}'
+
+
 # ----- 模式：webdav -----
+def webdav_upload_file(file_url: str, content: bytes, username: str, password: str,
+                       content_type: str = 'application/octet-stream',
+                       timeout: int = 30) -> Tuple[bool, str]:
+    """WebDAV 上传文件（PUT 方法）
+
+    用于上传跟单 / 表单文件到 NAS 存储区域。
+    """
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    try:
+        resp = requests.put(
+            file_url,
+            data=content,
+            auth=(username, password) if username else None,
+            headers={'User-Agent': 'channel-project-storage/1.0',
+                     'Content-Type': content_type},
+            timeout=timeout,
+            verify=False,
+        )
+        if 200 <= resp.status_code < 300:
+            return True, f'HTTP {resp.status_code}'
+        return False, f'HTTP {resp.status_code}: {resp.text[:200]}'
+    except Exception as e:
+        return False, f'上传失败: {e}'
+
+
 def webdav_request(method: str, url: str, username: str, password: str,
                    timeout: int = 10, depth: str = '1') -> Tuple[bool, str]:
     """WebDAV HTTP 请求（BASIC auth）

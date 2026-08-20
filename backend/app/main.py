@@ -11,7 +11,7 @@ import yaml
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app.database import engine, Base
-from app.routers import auth, users, projects, approvals, reports, file_storage, forms, storage_zones, system as system_router
+from app.routers import auth, users, projects, approvals, reports, file_storage, forms, storage_zones, project_followups, system as system_router
 from app.routers.audit import router as audit_router
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -95,6 +95,65 @@ async def lifespan(app: FastAPI):
             c.close()
     except Exception as e:
         print(f"[warn] 迁移 responsible_sales 失败: {e}")
+    # 兼容旧库：project_followups 加 form_data 列
+    try:
+        import sqlite3 as _sqlite3
+        from app.database import load_config
+        cfg = load_config()
+        path = cfg["database"]["url"].replace("sqlite:///", "", 1)
+        if path.startswith("/") and len(path) > 2 and path[2] == ":":
+            path = path[1:]
+        c = _sqlite3.connect(path, timeout=10)
+        try:
+            tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            if 'project_followups' not in tables:
+                # 表会在 Base.metadata.create_all 之后创建；这里只处理已存在的表
+                pass
+            else:
+                cols = [r[1] for r in c.execute("PRAGMA table_info(project_followups)").fetchall()]
+                if 'form_data' not in cols:
+                    c.execute("ALTER TABLE project_followups ADD COLUMN form_data TEXT")
+                    print('[migrate] project_followups.form_data 列已添加')
+        finally:
+            c.close()
+    except Exception as e:
+        print(f"[warn] 迁移 project_followups.form_data 失败: {e}")
+    # 清理 project_followups.form_data 中的非标准字符串（如 Python str(dict) 而非 JSON）
+    try:
+        import sqlite3 as _sqlite3
+        import json as _json_clean
+        from app.database import load_config
+        cfg = load_config()
+        path = cfg["database"]["url"].replace("sqlite:///", "", 1)
+        if path.startswith("/") and len(path) > 2 and path[2] == ":":
+            path = path[1:]
+        c = _sqlite3.connect(path, timeout=10)
+        try:
+            tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            if 'project_followups' in tables:
+                cols = [r[1] for r in c.execute("PRAGMA table_info(project_followups)").fetchall()]
+                if 'form_data' in cols:
+                    rows = c.execute("SELECT id, form_data FROM project_followups WHERE form_data IS NOT NULL AND form_data != ''").fetchall()
+                    fixed = 0
+                    for rid, fd in rows:
+                        if not isinstance(fd, str):
+                            continue
+                        # 先尝试解析
+                        try:
+                            _json_clean.loads(fd)
+                            continue  # 已经是合法 JSON，跳过
+                        except Exception:
+                            pass
+                        # 不是合法 JSON，安全降级为 NULL（旧数据不兼容）
+                        c.execute("UPDATE project_followups SET form_data = NULL WHERE id = ?", (rid,))
+                        fixed += 1
+                    if fixed:
+                        c.commit()
+                        print(f'[migrate] project_followups.form_data 已清理 {fixed} 条非标准字符串')
+        finally:
+            c.close()
+    except Exception as e:
+        print(f"[warn] 清理 project_followups.form_data 失败: {e}")
     # 创建 form_templates / form_instances 表（表单生成器）
     try:
         import sqlite3 as _sqlite3
@@ -234,7 +293,7 @@ async def lifespan(app: FastAPI):
     from app.database import SessionLocal
     from app.models import User, UserRole, FormTemplate, StorageZone
     from app.auth import hash_password
-    from app.services.builtin_templates import CHANNEL_PROJECT_TEMPLATE, SELF_PROJECT_TEMPLATE
+    from app.services.builtin_templates import CHANNEL_PROJECT_TEMPLATE, SELF_PROJECT_TEMPLATE, FOLLOWUP_TEMPLATE
     db = SessionLocal()
     try:
         admin = db.query(User).filter(User.username == "admin").first()
@@ -259,7 +318,8 @@ async def lifespan(app: FastAPI):
                 print(f"    建议立即登录后修改密码！或通过环境变量 DEFAULT_ADMIN_PASSWORD 预置自定义初始密码。")
 
         # 同步两个内置表单模板（渠道项目 + 自营项目）
-        # 若已存在同名模板，则用最新代码里的字段定义覆盖（确保所见即所得）
+        # 策略：仅在首次（数据库中不存在时）用代码里的字段初始化；已存在的模板不再覆盖
+        # 这样用户在 FormBuilder 中编辑的修改会被保留，不会被后端重启抹掉
         try:
             import json
             # 兼容：把旧名「自建项目登记表」迁移为新名「自营项目登记表」
@@ -269,16 +329,19 @@ async def lifespan(app: FastAPI):
                 old_self.name = '自营项目登记表'
                 db.commit()
                 print('[migrate] form_templates: 自建项目登记表 → 自营项目登记表')
-            for builtin in [CHANNEL_PROJECT_TEMPLATE, SELF_PROJECT_TEMPLATE]:
+            for builtin in [CHANNEL_PROJECT_TEMPLATE, SELF_PROJECT_TEMPLATE, FOLLOWUP_TEMPLATE]:
                 fields_json = json.dumps(builtin['fields'], ensure_ascii=False)
                 existing = db.query(FormTemplate).filter(FormTemplate.name == builtin['name']).first()
                 if existing:
-                    existing.fields = fields_json
+                    # 已存在：只更新元数据（description/storage_zone_id），不覆盖 fields
+                    # （fields 由用户在 FormBuilder 中维护，代码不强制覆盖）
                     existing.description = builtin.get('description', '')
-                    existing.storage_sub_path = builtin.get('storage_sub_path')
-                    existing.storage_zone_id = builtin.get('storage_zone_id')
+                    if builtin.get('storage_zone_id'):
+                        existing.storage_zone_id = builtin.get('storage_zone_id')
+                    if builtin.get('storage_sub_path'):
+                        existing.storage_sub_path = builtin.get('storage_sub_path')
                     existing.is_active = True
-                    print(f"[sync] 内置模板已同步: {builtin['name']} (id={existing.id})")
+                    print(f"[sync] 内置模板已存在,保留用户编辑: {builtin['name']} (id={existing.id})")
                 else:
                     tpl = FormTemplate(
                         name=builtin['name'],
@@ -456,6 +519,7 @@ app.include_router(audit_router)
 app.include_router(system_router.router)
 app.include_router(forms.router)
 app.include_router(storage_zones.router)
+app.include_router(project_followups.router)
 
 @app.get("/api/health")
 def health_check():

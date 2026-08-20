@@ -158,18 +158,19 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
         creator_username: p?.username,
         creator_real_name: p?.real_name,
       }
-      // 必填校验：只有项目名称 + 责任销售 都填了才预览文件夹路径
-      // 否则只显示"待填写"占位符（避免用 real_name 兑底导致误导）
+      // 必填校验：只有项目名称填了才预览文件夹路径
+      // 责任销售留空 → 后端会用当前账号姓名兑底（视为销售本人）
       const hasName = !!(form.project_name && form.project_name.trim())
-      const hasSales = !!(form.responsible_sales && form.responsible_sales.trim())
-      if (!hasName || !hasSales) {
+      if (!hasName) {
         if (isSubscribed) {
-          const placeholder = '请先填写项目名称和责任销售'
+          const placeholder = '请先填写项目名称'
           setTenderPreview(placeholder)
           setBidPreview(placeholder)
         }
         return
       }
+      // 责任销售兑底：空 → 当前账号姓名
+      const salesForPreview = (form.responsible_sales || '').trim() || (user?.real_name || user?.username || '')
       try {
         // 1. 获取预览路径（自建项目需要传 source/storage_zone_id 让后端选择正确的 base_path）
         // 编辑模式：使用 project 实际的 source/storage_zone_id
@@ -179,8 +180,8 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
           storage_zone_id: project?.storage_zone_id,
         }
         const [resTender, resBid] = await Promise.all([
-          previewFileStoragePath({ project_name: form.project_name, folder_type: 'tender', responsible_sales: form.responsible_sales, ...creatorPayload, ...previewExtra }).catch(() => ({})),
-          previewFileStoragePath({ project_name: form.project_name, folder_type: 'bid', responsible_sales: form.responsible_sales, ...creatorPayload, ...previewExtra }).catch(() => ({})),
+          previewFileStoragePath({ project_name: form.project_name, folder_type: 'tender', responsible_sales: salesForPreview, ...creatorPayload, ...previewExtra }).catch(() => ({})),
+          previewFileStoragePath({ project_name: form.project_name, folder_type: 'bid', responsible_sales: salesForPreview, ...creatorPayload, ...previewExtra }).catch(() => ({})),
         ])
         if (isSubscribed) {
           setTenderPreview((resTender?.data ?? resTender)?.tender_folder || (resTender?.data ?? resTender)?.path || '')
@@ -216,7 +217,8 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
   const validate = () => {
     const errs = {}
     if (!form.project_name?.trim()) errs.project_name = '项目名称必填'
-    if (!form.responsible_sales?.trim()) errs.responsible_sales = '责任销售必填'
+    // 责任销售非必填：留空 → 后端使用当前账号姓名
+    // （校验留空，但服务端会兜底）
     if (!form.project_type) errs.project_type = '项目类型必填'
     if (form.expected_amount === '' || form.expected_amount === null || form.expected_amount === undefined) {
       errs.expected_amount = '预计金额必填'
@@ -725,13 +727,14 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    责任销售<Star />
+                    责任销售
                     {withdrawMode && <span className="ml-2 text-xs text-gray-400">（撤回后可修改）</span>}
                   </label>
                   <input type="text" value={form.responsible_sales || ''}
                     onChange={e => setForm(f => ({ ...f, responsible_sales: e.target.value }))}
-                    placeholder="请输入责任销售姓名（用于文件夹命名）"
+                    placeholder="如由销售本人建立，此处可不填"
                     className={errors.responsible_sales ? inputErrCls : inputCls} />
+                  {errors.responsible_sales && <p className="text-xs text-red-500 mt-1">{errors.responsible_sales}</p>}
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">项目编号</label>

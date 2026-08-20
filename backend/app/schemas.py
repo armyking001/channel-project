@@ -89,7 +89,7 @@ class ProjectBase(BaseModel):
     storage_zone_id: Optional[int] = None  # 存储区域（默认使用系统默认区域）
 
 class ProjectCreate(ProjectBase):
-    responsible_sales: str = Field(..., min_length=1, max_length=100)  # 责任销售必填（用于文件夹命名）
+    responsible_sales: Optional[str] = Field(None, max_length=100)  # 责任销售可空（留空则用当前账号姓名）
 
     @field_validator('tender_time', 'bid_time', mode='before')
     @classmethod
@@ -98,6 +98,107 @@ class ProjectCreate(ProjectBase):
         if v in ('', None):
             return None
         return v
+
+
+# ============ 项目跟单 ============
+FOLLOWUP_STAGE_CHOICES = ["需求对接", "方案提供", "商务沟通", "投标报价", "其他"]
+
+
+class ProjectFollowupCreate(BaseModel):
+    project_id: int
+    stage: str = "其他"
+    progress: Optional[str] = None
+    risks: Optional[str] = None
+    next_plan: Optional[str] = None
+    next_owner: Optional[str] = None
+    next_deadline: Optional[date] = None
+    expected_amount: Optional[float] = None
+    expected_sign_date: Optional[date] = None
+    period_type: Optional[str] = None  # week / month / fixed
+    period_label: Optional[str] = None
+    form_data: Optional[dict] = None   # 模板自定义字段 {key: value}
+
+
+class ProjectFollowupUpdate(BaseModel):
+    stage: Optional[str] = None
+    progress: Optional[str] = None
+    risks: Optional[str] = None
+    next_plan: Optional[str] = None
+    next_owner: Optional[str] = None
+    next_deadline: Optional[date] = None
+    expected_amount: Optional[float] = None
+    expected_sign_date: Optional[date] = None
+    period_type: Optional[str] = None
+    period_label: Optional[str] = None
+    form_data: Optional[dict] = None
+
+
+class ProjectFollowupResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    project_id: int
+    project_name: Optional[str] = None
+    project_code: Optional[str] = None
+    responsible_sales: Optional[str] = None
+    stage: str
+    progress: Optional[str] = None
+    risks: Optional[str] = None
+    next_plan: Optional[str] = None
+    next_owner: Optional[str] = None
+    next_deadline: Optional[date] = None
+    expected_amount: Optional[float] = None
+    expected_sign_date: Optional[date] = None
+    period_type: Optional[str] = None
+    period_label: Optional[str] = None
+    form_data: Optional[dict] = None
+    reporter_id: int
+    reporter_name: Optional[str] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    @field_validator('form_data', mode='before')
+    @classmethod
+    def parse_form_data(cls, v):
+        """ProjectFollowup.form_data 在数据库中是 JSON 字符串，此处解析为 dict。
+        兼容老数据中可能存在的非标准 JSON 字符串（如 str(dict)）。"""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            import json as _json
+            try:
+                return _json.loads(v)
+            except Exception:
+                # 非标准 JSON 字符串（str(dict) 之类），返回 None 以避免 Pydantic 报错
+                return None
+        if isinstance(v, dict):
+            return v
+        return None
+
+    @field_validator('stage', mode='before')
+    @classmethod
+    def parse_stage(cls, v):
+        if hasattr(v, 'value'):
+            return v.value
+        return v
+
+
+class ProjectFollowupListResponse(BaseModel):
+    items: List[ProjectFollowupResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class FollowupStageStat(BaseModel):
+    stage: str
+    count: int
+
+
+class FollowupSummary(BaseModel):
+    total: int
+    by_stage: List[FollowupStageStat]
+    expected_total_amount: float
+    projects_with_followup: int
 
 class ProjectUpdate(BaseModel):
     project_name: Optional[str] = None

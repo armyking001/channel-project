@@ -44,8 +44,8 @@ def build_project_query(db: Session, current_user: User, filters: dict):
     # 其他筛选
     if filters.get("project_name"):
         q = q.filter(Project.project_name.contains(filters["project_name"]))
-    if filters.get("partner_company"):
-        q = q.filter(Project.partner_company.contains(filters["partner_company"]))
+    if filters.get("responsible_sales"):
+        q = q.filter(Project.responsible_sales.contains(filters["responsible_sales"]))
     if filters.get("approval_status"):
         q = q.filter(Project.approval_status == filters["approval_status"])
     if filters.get("win_bid_status"):
@@ -69,7 +69,7 @@ def list_projects(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     project_name: Optional[str] = None,
-    partner_company: Optional[str] = None,
+    responsible_sales: Optional[str] = None,
     approval_status: Optional[str] = None,
     win_bid_status: Optional[str] = None,
     start_date: Optional[str] = None,
@@ -82,7 +82,7 @@ def list_projects(
 ):
     filters = {
         "project_name": project_name,
-        "partner_company": partner_company,
+        "responsible_sales": responsible_sales,
         "approval_status": approval_status,
         "win_bid_status": win_bid_status,
         "start_date": start_date,
@@ -138,6 +138,11 @@ def create_project(
     if not (data.project_name and data.project_name.strip()):
         raise HTTPException(status_code=422, detail="项目名称不能为空")
 
+    # 责任销售：留空 → 默认使用当前账号的姓名（视为销售本人）
+    rs = (data.responsible_sales or '').strip()
+    if not rs:
+        rs = current_user.real_name or current_user.username
+
     # 自动获取审批人：优先使用当前用户的上级（parent_id），没有上级则用系统管理员
     approver_id = None
     if current_user.parent_id:
@@ -163,7 +168,7 @@ def create_project(
         try:
             folders = create_project_folders(
                 db, storage_cfg, current_user.username, current_user.real_name, data.project_name,
-                responsible_sales=getattr(data, 'responsible_sales', None)
+                responsible_sales=rs
             )
             tender_folder = folders['tender_folder']
             bid_folder = folders['bid_folder']
@@ -173,6 +178,8 @@ def create_project(
             log.error(f"[create_project] 文件夹创建失败: {e}\n{traceback.format_exc()}")
 
     payload = data.model_dump()
+    # 责任销售：已兜底为 current_user.real_name，强制写回 payload
+    payload['responsible_sales'] = rs
     # 把空字符串规范化成 None（DB 列允许 NULL 的字段）
     for k in ('project_code', 'partner_company', 'owner_contact_person', 'owner_contact_info',
               'company_address', 'main_qualification', 'legal_representative',
@@ -238,6 +245,12 @@ def update_project(
     if not is_admin and 'win_bid_status' in update_data:
         del update_data['win_bid_status']
 
+    # 责任销售留空 → 默认使用当前账号的姓名
+    if 'responsible_sales' in update_data:
+        rs_upd = (update_data['responsible_sales'] or '').strip()
+        if not rs_upd:
+            update_data['responsible_sales'] = current_user.real_name or current_user.username
+
     # 中标状态修改权限校验：
     # - 首次修改（win_bid_status_set_at is None）：admin 可直接改
     # - 非首次修改（win_bid_status_set_at is not None）：admin 必须提供「修改理由」+「密码验证」
@@ -258,6 +271,25 @@ def update_project(
     if not update_data:
         return project
     
+    # 唯一性校验：项目编号（空字符串视为 None — 允许多个空项目编号）
+    if 'project_code' in update_data:
+        new_code = (update_data['project_code'] or '').strip() or None
+        update_data['project_code'] = new_code
+        if new_code:
+            dup = db.query(Project).filter(
+                Project.project_code == new_code,
+                Project.id != project_id,
+            ).first()
+            if dup:
+                raise HTTPException(status_code=400, detail="项目编号已存在")
+
+    # 把空字符串规范化为 None（DB 列允许 NULL 的字段；避免 unique 冲突）
+    for k in ('project_code', 'partner_company', 'owner_contact_person', 'owner_contact_info',
+              'company_address', 'main_qualification', 'legal_representative',
+              'contact_person', 'contact_info', 'project_overview', 'tender_file', 'bid_file'):
+        if k in update_data and update_data[k] in ('', None):
+            update_data[k] = None
+
     # 记录变更
     changes = {}
     for field, value in update_data.items():

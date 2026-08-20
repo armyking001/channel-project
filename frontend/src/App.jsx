@@ -10,6 +10,7 @@ import AuditLogs from './pages/AuditLogs'
 import FormTemplates from './pages/FormTemplates'
 import FormBuilder from './pages/FormBuilder'
 import StorageZones from './pages/StorageZones'
+import ProjectFollowups from './pages/ProjectFollowups'
 import Layout from './components/Layout'
 
 function ProtectedRoute({ children }) {
@@ -26,6 +27,7 @@ function App() {
           <Route path="/" element={<Navigate to="/projects" replace />} />
           <Route path="/projects" element={<Projects />} />
           <Route path="/approvals" element={<Approvals />} />
+          <Route path="/project-followups" element={<ProjectFollowups />} />
           <Route path="/reports" element={<Reports />} />
           <Route path="/file-storage" element={<StorageZones />} />
           <Route path="/admin/users" element={<UserManagement />} />

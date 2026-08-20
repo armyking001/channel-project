@@ -165,7 +165,9 @@ export default function DynamicForm({ template, onClose, onSubmitted, instanceId
     const errs = {}
     fields.forEach(f => {
       const val = values[f.key]
-      if (f.required) {
+      // 责任销售字段统一不强制必填（即使 DB 中标记 required=true）
+      const isSales = (f.label || '').trim() === '责任销售'
+      if (f.required && !isSales) {
         if (val === undefined || val === null || val === '' ||
             (Array.isArray(val) && val.length === 0)) {
           errs[f.key] = `${f.label}必填`
@@ -335,11 +337,19 @@ export default function DynamicForm({ template, onClose, onSubmitted, instanceId
     const err = errors[f.key]
     const cls = err ? inputErrCls : inputCls
 
+    // 占位符统一覆盖：责任销售字段统一文案（不修改数据库中的模板字段定义）
+    let fieldPh = f.placeholder
+    // 责任销售字段统一不强制必填（数据库中可能仍标记 required=true，统一忽略）
+    const isSalesField = (f.label || '').trim() === '责任销售'
+    if (isSalesField) {
+      fieldPh = '如由销售本人建立，此处可不填'
+    }
+
     if (f.type === 'file') {
       return (
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">
-            {f.label}{f.required && <Star />}
+            {f.label}{f.required && !isSalesField && <Star />}
           </label>
           {renderDropZone(f)}
           {renderFileList(f)}
@@ -350,15 +360,15 @@ export default function DynamicForm({ template, onClose, onSubmitted, instanceId
     let input = null
     switch (f.type) {
       case 'text':
-        input = <input type="text" value={val || ''} onChange={e => handleChange(f.key, e.target.value)} placeholder={f.placeholder} className={cls} />
+        input = <input type="text" value={val || ''} onChange={e => handleChange(f.key, e.target.value)} placeholder={fieldPh} className={cls} />
         break
       case 'textarea':
-        input = <textarea value={val || ''} onChange={e => handleChange(f.key, e.target.value)} placeholder={f.placeholder} rows={5} className={cls} />
+        input = <textarea value={val || ''} onChange={e => handleChange(f.key, e.target.value)} placeholder={fieldPh} rows={5} className={cls} />
         break
       case 'number':
         input = (
           <div className="flex items-center gap-2">
-            <input type="number" step="0.01" value={val ?? ''} onChange={e => handleChange(f.key, e.target.value)} placeholder={f.placeholder || '0.00'} className={cls} />
+            <input type="number" step="0.01" value={val ?? ''} onChange={e => handleChange(f.key, e.target.value)} placeholder={fieldPh || '0.00'} className={cls} />
             {f.unit && <span className="text-sm text-gray-500 whitespace-nowrap">{f.unit}</span>}
           </div>
         )
@@ -409,7 +419,7 @@ export default function DynamicForm({ template, onClose, onSubmitted, instanceId
     return (
       <div>
         <label className="block text-sm font-medium text-gray-700 mb-1">
-          {f.label}{f.required && <Star />}
+          {f.label}{f.required && !isSalesField && <Star />}
         </label>
         {input}
         {err && <p className="text-red-500 text-xs mt-1">{err}</p>}

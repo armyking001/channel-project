@@ -56,7 +56,7 @@ def list_pending(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     project_name: Optional[str] = None,
-    partner_company: Optional[str] = None,
+    responsible_sales: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -67,8 +67,8 @@ def list_pending(
     )
     if project_name:
         q = q.filter(Project.project_name.contains(project_name))
-    if partner_company:
-        q = q.filter(Project.partner_company.contains(partner_company))
+    if responsible_sales:
+        q = q.filter(Project.responsible_sales.contains(responsible_sales))
 
     total = q.count()
     items = q.order_by(Project.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
@@ -80,7 +80,7 @@ def list_history(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     project_name: Optional[str] = None,
-    partner_company: Optional[str] = None,
+    responsible_sales: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -92,8 +92,8 @@ def list_history(
     )
     if project_name:
         q = q.filter(Project.project_name.contains(project_name))
-    if partner_company:
-        q = q.filter(Project.partner_company.contains(partner_company))
+    if responsible_sales:
+        q = q.filter(Project.responsible_sales.contains(responsible_sales))
 
     total = q.count()
     items = q.order_by(Project.updated_at.desc()).offset((page - 1) * page_size).limit(page_size).all()

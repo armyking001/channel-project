@@ -4,12 +4,37 @@ import { useAuthStore } from '../stores/auth'
 import ChangePasswordModal from './ChangePasswordModal'
 
 export default function Layout() {
-  const { user, logout } = useAuthStore()
+  const { user, setAuth, logout } = useAuthStore()
   const navigate = useNavigate()
 
   const [showUserMenu, setShowUserMenu] = useState(false)
   const [showChangePwd, setShowChangePwd] = useState(false)
   const menuRef = useRef(null)
+
+  // 每次进入页面都向后端校验当前登录账号（防止 localStorage 缓存与 token 不一致）
+  useEffect(() => {
+    let cancelled = false
+    async function refreshMe() {
+      const token = localStorage.getItem('token')
+      if (!token) return
+      try {
+        const { getMe } = await import('../api')
+        const r = await getMe()
+        if (cancelled) return
+        // 与 store 中现有 user 对比，不一致则同步（可能是另 tab 切换了账号）
+        const fresh = r.data
+        const cur = useAuthStore.getState().user
+        if (!cur || cur.id !== fresh.id || cur.role !== fresh.role) {
+          setAuth(fresh, token)
+        }
+      } catch (e) {
+        // 401 时 axios 拦截器会跳登录页；其他错误忽略
+        console.warn('[Layout] refreshMe failed:', e?.response?.status, e?.message)
+      }
+    }
+    refreshMe()
+    return () => { cancelled = true }
+  }, [setAuth])
 
   useEffect(() => {
     function onClickOutside(e) {
@@ -68,6 +93,9 @@ export default function Layout() {
               ✅ 审批管理
             </Link>
           )}
+          <Link to="/project-followups" className="block px-4 py-2 rounded hover:bg-gray-700 transition">
+            📈 项目跟单
+          </Link>
           <Link to="/reports" className="block px-4 py-2 rounded hover:bg-gray-700 transition">
             📊 报表管理
           </Link>

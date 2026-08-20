@@ -171,6 +171,7 @@ class Project(Base):
     approver = relationship("User", back_populates="projects_approved", foreign_keys=[approver_id])
     storage_zone = relationship("StorageZone", foreign_keys=[storage_zone_id])
     approval_logs = relationship("ApprovalLog", back_populates="project", cascade="all, delete-orphan")
+    followups = relationship("ProjectFollowup", back_populates="project", cascade="all, delete-orphan")
 
 class ApprovalLog(Base):
     __tablename__ = "approval_logs"
@@ -185,6 +186,44 @@ class ApprovalLog(Base):
     # 关联
     project = relationship("Project", back_populates="approval_logs")
     approver_user = relationship("User", back_populates="approval_logs")
+
+
+class FollowupStage(str, enum.Enum):
+    """项目跟单 — 所处阶段"""
+    demand = "需求对接"
+    solution = "方案提供"
+    negotiation = "商务沟通"
+    bidding = "投标报价"
+    other = "其他"
+
+
+class ProjectFollowup(Base):
+    """项目跟单 / 项目汇报
+    一次跟单 = 一个时间点上的进展快照，按 project_id 串联为时间轴
+    """
+    __tablename__ = "project_followups"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    stage = Column(Enum(FollowupStage, values_callable=lambda x: [e.value for e in x]),
+                   nullable=False, default=FollowupStage.other)
+    progress = Column(Text, nullable=True)           # 当前进展描述
+    risks = Column(Text, nullable=True)             # 风险与所需支持
+    next_plan = Column(Text, nullable=True)         # 下一步计划
+    next_owner = Column(String(100), nullable=True) # 责任人
+    next_deadline = Column(Date, nullable=True)     # 截止时间
+    expected_amount = Column(Float, nullable=True)   # 预计成交金额（万元）
+    expected_sign_date = Column(Date, nullable=True)# 预计签单日期
+    period_type = Column(String(20), nullable=True) # 周/月/固定时间段（自由文本）
+    period_label = Column(String(100), nullable=True) # 例如 "2026年第34周" / "2026-08"
+    form_data = Column(Text, nullable=True)         # 模板自定义字段（JSON: {key: value}）
+    reporter_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # 关联
+    project = relationship("Project", back_populates="followups")
+    reporter = relationship("User", foreign_keys=[reporter_id])
 
 
 class AuditAction(str, enum.Enum):
