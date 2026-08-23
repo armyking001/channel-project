@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 from typing import Optional, List
 from datetime import date, datetime
-from app.models import UserRole, CooperationMode, FeeMode, IsSM, WinBidStatus, ApprovalStatus, ApprovalAction, StorageMode, ProjectType
+from app.models import UserRole, CooperationMode, FeeMode, IsSM, WinBidStatus, ApprovalStatus, ApprovalAction, StorageMode, ProjectType, NotificationType, AIModelType
 
 # ============ 通用 ============
 class MessageResponse(BaseModel):
@@ -14,6 +14,8 @@ class UserBase(BaseModel):
     role: UserRole = UserRole.normal
     parent_id: Optional[int] = None
     is_active: bool = True
+    phone: Optional[str] = Field(default=None, max_length=20)
+    dingtalk_user_id: Optional[str] = Field(default=None, max_length=100)
 
 class UserCreate(UserBase):
     password: str = Field(..., min_length=6)
@@ -25,6 +27,8 @@ class UserUpdate(BaseModel):
     parent_id: Optional[int] = None
     is_active: Optional[bool] = None
     password: Optional[str] = Field(default=None, min_length=6)  # 审批通过时设置密码
+    phone: Optional[str] = Field(default=None, max_length=20)  # 手机号(短信通道用)
+    dingtalk_user_id: Optional[str] = Field(default=None, max_length=100)  # 钉钉用户 id(工作通知用)
 
 class UserPasswordReset(BaseModel):
     new_password: str = Field(..., min_length=6)
@@ -39,6 +43,8 @@ class UserResponse(BaseModel):
     is_active: bool
     is_rejected: bool = False
     pending_password: Optional[str] = None  # 仅"待审批"用户返回，审批后清除
+    phone: Optional[str] = None
+    dingtalk_user_id: Optional[str] = None
     created_at: datetime
 
 class UserLogin(BaseModel):
@@ -425,6 +431,142 @@ class FormTemplateResponse(BaseModel):
         return v or []
 
 
+class AIModelConfigCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    model_type: AIModelType = AIModelType.local
+    provider: str = Field(default="openai_compatible", max_length=50)
+    base_url: Optional[str] = Field(default=None, max_length=500)
+    model_name: str = Field(..., min_length=1, max_length=200)
+    api_key: Optional[str] = Field(default=None, max_length=500)
+    temperature: float = Field(default=0.2, ge=0, le=2)
+    max_tokens: Optional[int] = Field(default=None, ge=1)
+    timeout_seconds: int = Field(default=60, ge=5, le=600)
+    is_enabled: bool = True
+    is_default: bool = False
+    notes: Optional[str] = None
+
+
+class AIModelConfigUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    model_type: Optional[AIModelType] = None
+    provider: Optional[str] = Field(default=None, max_length=50)
+    base_url: Optional[str] = Field(default=None, max_length=500)
+    model_name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    api_key: Optional[str] = Field(default=None, max_length=500)
+    temperature: Optional[float] = Field(default=None, ge=0, le=2)
+    max_tokens: Optional[int] = Field(default=None, ge=1)
+    timeout_seconds: Optional[int] = Field(default=None, ge=5, le=600)
+    is_enabled: Optional[bool] = None
+    is_default: Optional[bool] = None
+    notes: Optional[str] = None
+
+
+class AIModelConfigResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    name: str
+    model_type: AIModelType
+    provider: str
+    base_url: Optional[str] = None
+    model_name: str
+    api_key: Optional[str] = None
+    temperature: float
+    max_tokens: Optional[int] = None
+    timeout_seconds: int
+    is_enabled: bool
+    is_default: bool
+    notes: Optional[str] = None
+    created_by: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    creator: Optional[UserResponse] = None
+
+
+class AIModelPresetResponse(BaseModel):
+    key: str
+    name: str
+    provider: str
+    model_type: AIModelType
+    base_url: str
+    model_name: str
+    description: Optional[str] = None
+    notes: Optional[str] = None
+    recommended_timeout_seconds: int = 60
+    recommended_temperature: float = 0.2
+
+
+class AIModelTestRequest(BaseModel):
+    prompt: str = Field(default="请只回复“连接成功”四个字。", min_length=1, max_length=500)
+
+
+class AIModelTestResponse(BaseModel):
+    success: bool
+    message: str
+    latency_ms: int
+    status_code: Optional[int] = None
+    provider: str
+    model_name: str
+    response_preview: Optional[str] = None
+
+
+class AIAnalysisRequest(BaseModel):
+    model_id: Optional[int] = None
+    prompt: str = Field(..., min_length=1)
+    keyword: Optional[str] = None
+    project_type: Optional[str] = None
+    project_name: Optional[str] = None
+    responsible_sales: Optional[str] = None
+    win_bid_status: Optional[str] = None
+    partner_company: Optional[str] = None
+    amount_min: Optional[float] = None
+    amount_max: Optional[float] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    fields: List[str] = Field(default_factory=list)
+    display_type: str = Field(default="table", max_length=50)
+
+
+class AIAnalysisResponse(BaseModel):
+    mode: str
+    message: str
+    model: Optional[AIModelConfigResponse] = None
+    agent: dict = Field(default_factory=dict)
+    filters: dict = Field(default_factory=dict)
+    fields: List[str] = Field(default_factory=list)
+    field_labels: dict = Field(default_factory=dict)
+    display_type: str
+    total_rows: int
+    summary_text: Optional[str] = None
+    answer: Optional[str] = None
+    preview_rows: List[dict] = Field(default_factory=list)
+    suggestions: List[str] = Field(default_factory=list)
+
+
+class AIReportAssistantRequest(BaseModel):
+    model_id: Optional[int] = None
+    question: str = Field(..., min_length=1, max_length=2000)
+    keyword: Optional[str] = None
+    project_type: Optional[str] = None
+    project_name: Optional[str] = None
+    responsible_sales: Optional[str] = None
+    win_bid_status: Optional[str] = None
+    partner_company: Optional[str] = None
+    amount_min: Optional[float] = None
+    amount_max: Optional[float] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    history: List[dict] = Field(default_factory=list)
+
+
+class AIReportAssistantResponse(BaseModel):
+    assistant_name: str
+    model: Optional[AIModelConfigResponse] = None
+    total_rows: int
+    summary_text: str
+    answer: str
+    tips: List[str] = Field(default_factory=list)
+
+
 # ============ 存储区域 ============
 class StorageZoneCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
@@ -493,6 +635,106 @@ class StorageZoneListResponse(BaseModel):
     items: List[StorageZoneResponse]
     total: int
 
+
+# ============ 通知中心 ============
+class NotificationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    receiver_id: int
+    type: NotificationType
+    title: str
+    content: Optional[str] = None
+    target_type: Optional[str] = None
+    target_id: Optional[int] = None
+    is_read: bool
+    read_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class NotificationListResponse(BaseModel):
+    items: List[NotificationResponse]
+    total: int
+    unread_count: int
+
+
+class NotificationUnreadResponse(BaseModel):
+    unread_count: int
+
+
+class NotificationSettingUpdate(BaseModel):
+    """按事件类型更新三个推送开关"""
+    in_app: Optional[bool] = None
+    sms: Optional[bool] = None
+    dingtalk: Optional[bool] = None
+
+
+class NotificationSettingResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    type: NotificationType
+    in_app: bool
+    sms: bool
+    dingtalk: bool
+
+
+class SystemAnnouncementRequest(BaseModel):
+    """admin 群发系统公告"""
+    title: str = Field(..., min_length=1, max_length=200)
+    content: str = Field(..., min_length=1)
+
+
+class NotificationChannelConfig(BaseModel):
+    """通知通道配置（in_skill_admin 配置)
+    type='dingtalk_webhook' : { "webhook": "https://oapi.dingtalk.com/robot/send?access_token=..." , "sign_secret": "可选" }
+    type='sms_aliyun'       : { "access_key_id": "...", "access_key_secret": "...", "sign_name": "...", "template_id": "..." }
+    type='sms_tencent'      : { "secret_id": "...", "secret_key": "...", "app_id": "...", "template_id": "...", "sign_name": "..." }
+    """
+    name: str = Field(..., min_length=1, max_length=100)
+    config: dict
+    enabled: bool = True
+
+
+class NotificationChannelResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    type: str
+    name: str
+    config: str  # JSON 字符串
+    enabled: bool
+
+
+class NotificationTemplateConfig(BaseModel):
+    """通知文案模板(自定义编辑)"""
+    title_template: str = Field(..., max_length=200)
+    content_template: str = Field(..., max_length=4000)
+    enabled: bool = True
+
+
+class NotificationTemplateResponse(BaseModel):
+    id: int
+    type: str
+    channel: str
+    title_template: str
+    content_template: str
+    enabled: bool
+
+    class Config:
+        from_attributes = True
+
+
+class NotificationGlobalConfigUpdate(BaseModel):
+    """全局通知配置更新(单一记录)"""
+    title_prefix: Optional[str] = Field(default=None, max_length=100)
+    apply_in_app: Optional[bool] = None
+
+
+class NotificationGlobalConfigResponse(BaseModel):
+    title_prefix: str
+    apply_in_app: bool
+    updated_at: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
 class FormInstanceCreate(BaseModel):
     template_id: int
     data: dict
@@ -533,3 +775,69 @@ class FormInstanceResponse(BaseModel):
 class FormInstanceListResponse(BaseModel):
     items: List[FormInstanceResponse]
     total: int
+
+
+# ============ 通知中心 ============
+class NotificationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    receiver_id: int
+    type: NotificationType
+    title: str
+    content: Optional[str] = None
+    target_type: Optional[str] = None
+    target_id: Optional[int] = None
+    is_read: bool
+    read_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class NotificationListResponse(BaseModel):
+    items: List[NotificationResponse]
+    total: int
+    unread_count: int
+
+
+class NotificationUnreadResponse(BaseModel):
+    unread_count: int
+
+
+class NotificationSettingUpdate(BaseModel):
+    """按事件类型更新三个推送开关"""
+    in_app: Optional[bool] = None
+    sms: Optional[bool] = None
+    dingtalk: Optional[bool] = None
+
+
+class NotificationSettingResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    type: NotificationType
+    in_app: bool
+    sms: bool
+    dingtalk: bool
+
+
+class SystemAnnouncementRequest(BaseModel):
+    """admin 群发系统公告"""
+    title: str = Field(..., min_length=1, max_length=200)
+    content: str = Field(..., min_length=1)
+
+
+class NotificationChannelConfig(BaseModel):
+    """通知通道配置（admin 配置)
+    type='dingtalk_webhook' : { 'webhook': 'https://oapi.dingtalk.com/robot/send?access_token=...' , 'sign_secret': '可选' }
+    type='sms_aliyun'       : { 'access_key_id': '...', 'access_key_secret': '...', 'sign_name': '...', 'template_id': '...' }
+    type='sms_tencent'      : { 'secret_id': '...', 'secret_key': '...', 'app_id': '...', 'template_id': '...', 'sign_name': '...' }
+    """
+    name: str = Field(..., min_length=1, max_length=100)
+    config: dict
+    enabled: bool = True
+
+
+class NotificationChannelResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    type: str
+    name: str
+    config: str  # JSON 字符串
+    enabled: bool

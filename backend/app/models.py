@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Date, Enum, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Date, Enum, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.orm import relationship, backref
 from sqlalchemy.sql import func
 from app.database import Base
@@ -105,6 +105,8 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     is_rejected = Column(Boolean, default=False)  # True = 申请被驳回（区别于 is_active=False 的"正常停用"）
     pending_password = Column(String(50), nullable=True)  # 申请时生成的初始明文密码（审批通过或驳回后清除）
+    phone = Column(String(20), nullable=True)  # 手机号（用于短信通知）
+    dingtalk_user_id = Column(String(100), nullable=True)  # 钉钉用户 ID（用于工作通知定向投递）
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -310,3 +312,142 @@ class FormInstance(Base):
     creator = relationship("User", foreign_keys=[created_by])
     approver = relationship("User", foreign_keys=[approver_id])
     storage_zone = relationship("StorageZone", foreign_keys=[storage_zone_id])
+
+
+class AIModelType(str, enum.Enum):
+    local = "local"
+    cloud = "cloud"
+
+
+class AIModelConfig(Base):
+    """AI 模型配置 — 统一管理本地/云端大模型接入参数"""
+    __tablename__ = "ai_model_configs"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    name = Column(String(100), nullable=False, unique=True)
+    model_type = Column(Enum(AIModelType), nullable=False, default=AIModelType.local)
+    provider = Column(String(50), nullable=False, default="openai_compatible")
+    base_url = Column(String(500), nullable=True)
+    model_name = Column(String(200), nullable=False)
+    api_key = Column(String(500), nullable=True)
+    temperature = Column(Float, nullable=False, default=0.2)
+    max_tokens = Column(Integer, nullable=True)
+    timeout_seconds = Column(Integer, nullable=False, default=60)
+    is_enabled = Column(Boolean, default=True, nullable=False)
+    is_default = Column(Boolean, default=False, nullable=False)
+    notes = Column(Text, nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    creator = relationship("User", foreign_keys=[created_by])
+
+
+class NotificationType(str, enum.Enum):
+    """通知类型"""
+    account_apply = "account_apply"          # 用户申请 — 通知 admin
+    account_approved = "account_approved"    # 账号审批通过 — 通知申请人
+    account_rejected = "account_rejected"    # 账号申请驳回 — 通知申请人
+    password_reset = "password_reset"        # 密码被重置 — 通知本人
+    followup_viewed = "followup_viewed"      # 跟单被查看 — 通知汇报人
+    project_pending = "project_pending"      # 项目待审批 — 通知审批人
+    project_approved = "project_approved"    # 项目审批通过 — 通知创建人
+    project_rejected = "project_rejected"    # 项目审批驳回 — 通知创建人
+    system_announcement = "system_announcement"  # 系统公告 — 通知全体
+
+
+class Notification(Base):
+    """通知消息 — 每条事件一行
+    - receiver_id: 接收人（0 表示全体广播;具体人或公告 fanout）
+    - type: 事件类型
+    - title / content: 文本
+    - target_type / target_id: 关联业务对象（点击通知跳转）
+    - is_read / read_at: 站内已读
+    - extra: JSON（推送记录 / 业务参数等）
+    """
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    receiver_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    type = Column(Enum(NotificationType), nullable=False, index=True)
+    title = Column(String(200), nullable=False)
+    content = Column(Text, nullable=True)
+    target_type = Column(String(50), nullable=True)   # 例如 'project' / 'followup' / 'user'
+    target_id = Column(Integer, nullable=True)
+    is_read = Column(Boolean, default=False, nullable=False, index=True)
+    read_at = Column(DateTime, nullable=True)
+    extra = Column(Text, nullable=True)  # JSON: 业务参数或推送标记
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    # 关联
+    receiver = relationship("User", foreign_keys=[receiver_id])
+
+
+class NotificationSetting(Base):
+    """通知偏好 — 每用户每事件类型一组开关
+    - in_app: 站内消息 + 铃铛 + 红点
+    - sms:    短信推送（按用户 phone）
+    - dingtalk: 钉钉工作通知（按用户 dingtalk_user_id）
+    未配置时使用全局默认（系统公告默认全部开启,其余按事件类型）
+    """
+    __tablename__ = "notification_settings"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    type = Column(Enum(NotificationType), nullable=False)
+    in_app = Column(Boolean, default=True, nullable=False)
+    sms = Column(Boolean, default=False, nullable=False)
+    dingtalk = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    user = relationship("User", foreign_keys=[user_id])
+
+
+class NotificationChannel(Base):
+    """通知通道配置 — 由 admin 配置,供系统推送时调用
+    一个 type 只允许启用一个渠道（最新一条生效）
+    """
+    __tablename__ = "notification_channels"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    type = Column(String(20), nullable=False, unique=True)  # 'dingtalk_webhook' / 'sms_aliyun' / 'sms_tencent'
+    name = Column(String(100), nullable=False)
+    config = Column(Text, nullable=False)  # JSON 配置(webhook URL / access_key / secret / sign / template_id 等)
+    enabled = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class NotificationGlobalConfig(Base):
+    """全局通知配置 — 单一记录(用 id=1)
+    - title_prefix: 钉钉/短信正文前的统一题头
+    - apply_in_app: 是否在站内也加同一题头(默认 false,避免重复)
+    """
+    __tablename__ = "notification_global_config"
+
+    id = Column(Integer, primary_key=True, default=1)
+    title_prefix = Column(String(100), default='【销售项目管理系统V2.0通知】', nullable=False)
+    apply_in_app = Column(Boolean, default=False, nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class NotificationTemplate(Base):
+    """通知文案模板 — 让 admin 自定义每个事件在每个通道的标题/正文
+    - channel: 'in_app' / 'dingtalk' / 'sms'
+    - title_template / content_template 支持占位符,如 {actor_name} {target_name} {project_name} 等
+    - 未配置 / enabled=false → 走默认 title/content
+    """
+    __tablename__ = "notification_templates"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    type = Column(String(50), nullable=False)  # NotificationType.value
+    channel = Column(String(20), nullable=False)  # in_app / dingtalk / sms
+    title_template = Column(String(200), nullable=False)
+    content_template = Column(Text, nullable=False)
+    enabled = Column(Boolean, default=True, nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint('type', 'channel', name='uq_nt_type_channel'),
+    )

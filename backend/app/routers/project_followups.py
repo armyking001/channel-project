@@ -444,6 +444,43 @@ def project_timeline(
         joinedload(ProjectFollowup.reporter),
         joinedload(ProjectFollowup.project),
     ).order_by(ProjectFollowup.created_at.desc()).all()
+    # 通知跟单被查看:仅通知最近的 reporter(汇报人,可能多人),
+    # 并跳过自己看自己、按项目去重(同一账号 60 秒内只发一次)
+    try:
+        from app.services.notifications import send_notification
+        from app.models import NotificationType
+        import time as _time
+        key = (current_user.id, project_id)
+        last_seen = getattr(project_timeline, "_seen_cache", None)
+        if last_seen is None:
+            last_seen = {}
+            setattr(project_timeline, "_seen_cache", last_seen)
+        now = _time.time()
+        if now - last_seen.get(key, 0) > 60:  # 60s 节流
+            last_seen[key] = now
+            seen_reporter = set()
+            for it in items:
+                if it.reporter_id in seen_reporter:
+                    continue
+                if it.reporter_id == current_user.id:
+                    continue  # 自己看自己的不通知
+                seen_reporter.add(it.reporter_id)
+                send_notification(
+                    db,
+                    receiver_id=it.reporter_id,
+                    type=NotificationType.followup_viewed,
+                    title="您的跟单被查看",
+                    content="{0} 查看了项目 \"{1}\" 的跟单时间轴".format(
+                        current_user.real_name or current_user.username,
+                        proj.project_name,
+                    ),
+                    target_type="followup_project", target_id=project_id,
+                    extra={"viewer_id": current_user.id, "viewer_name": current_user.real_name},
+                )
+            if seen_reporter:
+                db.commit()
+    except Exception:
+        pass
     return [_to_response(it) for it in items]
 
 

@@ -139,6 +139,25 @@ def approve(project_id: int, db: Session = Depends(get_db), current_user: User =
     write_audit(current_user, AuditAction.project_approve,
                 target_type='project', target_id=project.id, target_name=project.project_name,
                 details={}, request=request)
+    # 通知项目创建人
+    try:
+        if project.created_by and project.created_by != current_user.id:
+            from app.services.notifications import send_notification
+            from app.models import NotificationType
+            send_notification(
+                db,
+                receiver_id=project.created_by,
+                type=NotificationType.project_approved,
+                title="项目审批通过",
+                content="您提交的项目「{0}」已被 {1} 通过。".format(
+                    project.project_name,
+                    current_user.real_name or current_user.username,
+                ),
+                target_type="project", target_id=project.id,
+            )
+            db.commit()
+    except Exception:
+        pass
     return MessageResponse(message="已通过")
 
 
@@ -161,4 +180,23 @@ def reject(project_id: int, db: Session = Depends(get_db), current_user: User = 
     write_audit(current_user, AuditAction.project_reject,
                 target_type='project', target_id=project.id, target_name=project.project_name,
                 details={}, request=request)
+    # 通知项目创建人
+    try:
+        if project.created_by and project.created_by != current_user.id:
+            from app.services.notifications import send_notification
+            from app.models import NotificationType
+            send_notification(
+                db,
+                receiver_id=project.created_by,
+                type=NotificationType.project_rejected,
+                title="项目审批驳回",
+                content="您提交的项目「{0}」已被 {1} 驳回,请查看详情。".format(
+                    project.project_name,
+                    current_user.real_name or current_user.username,
+                ),
+                target_type="project", target_id=project.id,
+            )
+            db.commit()
+    except Exception:
+        pass
     return MessageResponse(message="已驳回")

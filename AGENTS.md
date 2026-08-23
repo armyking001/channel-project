@@ -4,6 +4,96 @@
 
 ---
 
+## 0. AI表单 + 报表 AI 一期骨架
+
+### 本次目标
+
+- 将原「表单管理」统一更名为 **AI表单**
+- 在同一入口内集中管理 **AI 模型配置 + AI 表单模板 + 表单记录**
+- 在报表管理页先落地第一期 MVP 骨架：
+  - 模型选择
+  - AI 分析入口
+  - 项目全量导出
+
+### 已实现
+
+#### 1) AI 模型配置
+
+- 新增后端模型：`AIModelConfig`
+  - 支持 `local / cloud`
+  - 支持 `provider / base_url / model_name / api_key / temperature / max_tokens / timeout_seconds`
+  - 支持 `is_enabled / is_default / notes`
+- 新增接口（挂在 `/api/forms` 下，统一归到 AI表单）
+  - `GET /api/forms/ai-models`
+  - `POST /api/forms/ai-models`
+  - `PUT /api/forms/ai-models/{id}`
+  - `DELETE /api/forms/ai-models/{id}`
+- 列表接口默认对 `api_key` 做掩码回显，避免前端直接读取完整密钥
+- 新增预置模型能力（展示于 `AI报表 -> 模型配置`）：
+  - `Kimi`
+  - `MiniMax`
+  - `DeepSeek`
+- 以上预置模型已内置默认 `provider / base_url / model_name / timeout / temperature`
+- 使用时只需填写 `API Key` 即可保存
+- 同时保留“自定义本地模型”入口，用于接入 `Ollama` 或内部 OpenAI 兼容服务
+- 新增模型测试接口：
+  - `POST /api/forms/ai-models/{id}/test`
+  - 用于测试模型连通性与响应耗时（ms）
+  - 前端会显示测试成功/失败、耗时、返回摘要
+- 修复一个兼容问题：
+  - 编辑模型时若 `api_key` 留空，后端不再把原值覆盖为空字符串
+
+#### 2) AI表单入口改造
+
+- 左侧菜单文案改为 **`🤖 AI表单`**
+- `/admin/forms` 页面升级为统一入口，增加四个页签：
+  - `总览`
+  - `模型配置`
+  - `AI表单模板`
+  - `表单记录`
+- `FormBuilder.jsx` 的标题和占位文案同步改为 AI 表单语义
+
+#### 3) 报表管理 AI 入口
+
+- 报表页顶部增加 **AI 分析入口**
+- 支持：
+  - 选择已启用模型
+  - 输入分析要求
+  - 勾选允许 AI 使用的字段
+  - 选择展示方式（表格 / 柱状图 / 趋势图 / 摘要）
+- 当前后端 `POST /api/reports/ai-analyze` 为 **MVP 骨架**
+  - 遵循现有报表权限范围取数
+  - 返回模型信息、筛选条件、字段列表、预览数据、后续建议
+  - 暂未真正调用本地/云端大模型，仅打通前后端通路
+
+#### 4) 报表全量导出
+
+- 新增接口：`GET /api/reports/export-full`
+- 在原 Excel 导出之外新增 **`📦 全量导出`** 按钮
+- 导出内容扩展为：
+  - 项目来源（自营 / 渠道）
+  - 表单实例 ID
+  - 责任销售
+  - 项目概述
+  - 存储区域
+  - 招标资料 / 投标文档目录
+  - 最新跟单阶段 / 进展 / 预计金额
+  - 创建时间 / 更新时间
+
+### 涉及文件
+
+- 后端模型：[backend/app/models.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/models.py)
+- 后端 Schemas：[backend/app/schemas.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/schemas.py)
+- AI表单路由：[backend/app/routers/forms.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/forms.py)
+- 报表路由：[backend/app/routers/reports.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/reports.py)
+- 前端 API：[frontend/src/api/index.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/api/index.jsx)
+- AI表单页：[frontend/src/pages/FormTemplates.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/FormTemplates.jsx)
+- AI表单构建页：[frontend/src/pages/FormBuilder.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/FormBuilder.jsx)
+- 报表页：[frontend/src/pages/Reports.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/Reports.jsx)
+- 布局导航：[frontend/src/components/Layout.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/Layout.jsx)
+
+---
+
 ## 1. 存储区域（StorageZone）多区域管理
 
 ### 背景
@@ -604,3 +694,416 @@ if existing:
 - **步骤徽章 + 提示框 + 表格 Light Grid 样式**：可视化操作路径
 
 
+
+
+---
+
+## 18. 通知中心 — 站内消息 + 红点 + 外部通道扩展（2026-08-21）
+
+### 需求
+
+业务上需要"管理账号需要审批/查看/通过时,软件右上角出现小红点,也可通过短信/钉钉通知"。这是核心流程的通知收口,适用于审批/跟单/账号/公告 4 类事件。
+
+### 数据模型
+
+[backend/app/models.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/models.py) 新增 3 张表 + `User` 表加 2 字段：
+
+#### Notification 表
+- `id`, `receiver_id`(接收人), `type`(事件类型), `title`, `content`
+- `target_type` + `target_id`(关联业务对象,点击跳转用)
+- `is_read` / `read_at`(站内已读)
+- `extra`(JSON:业务参数/推送标记)
+- `created_at`
+
+#### NotificationSetting 表
+- `(user_id, type)` 唯一
+- `in_app` / `sms` / `dingtalk` 三组布尔开关
+- 用户可单独关闭特定事件的某条通道
+
+#### NotificationChannel 表
+- `type` 唯一(`dingtalk_webhook` / `dingtalk_corp` / `sms_aliyun` / `sms_tencent`)
+- `name`, `config`(JSON), `enabled`
+- admin 配置密钥用,每类通道只保留一份最新配置
+
+#### User 加字段
+- `phone`(短信用)
+- `dingtalk_user_id`(钉钉工作通知定向投递用)
+
+### 事件类型 (NotificationType 枚举)
+
+| 事件 | 接收人 | 触发点 |
+|---|---|---|
+| `account_apply` | 所有 admin | [auth.apply_account](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/auth.py) 用户申请 |
+| `account_approved` / `account_rejected` | 申请人 | admin 通过/驳回账号申请(预留,后续接入) |
+| `password_reset` | 被重置人 | [users.reset_password](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/users.py) admin 重置密码 |
+| `followup_viewed` | 该跟单的 reporter(去重 + 60s 节流) | [project_followups.project_timeline](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/project_followups.py) 跟单被查看 |
+| `project_pending` | 项目的 approver_id | [projects.create_project](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/projects.py) 项目创建 + [projects.submit_project](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/projects.py) 提交审批 |
+| `project_approved` / `project_rejected` | 项目 created_by | [approvals.approve / reject](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/approvals.py) |
+| `system_announcement` | 全体 active user(fanout,排除发送人) | [notifications_ws.announce](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/notifications_ws.py) admin 群发 |
+
+### 推送策略
+
+[backend/app/services/notifications.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/services/notifications.py) 核心设计：
+
+1. **WS 连接池**:`ConnectionManager` 按 `user_id` 维护 `Set[WebSocket]`,支持多 tab 同号连
+2. **事件循环绑定**:`lifespan` 启动时 `set_event_loop(asyncio.get_running_loop())`,后续同步 DB 操作可用 `run_coroutine_threadsafe` schedule 异步 WS 推送
+3. **双通道落地**:
+   - **站内**:写 `notifications` 表 + 立即 `WS.send_to(user_id, {event: "notification.new", data: {...}})`
+   - **外部(sms/dingtalk)**:根据用户的 `notification_settings` 决策 → `_schedule_external` async 推到事件循环 → `_send_sms` / `_send_dingtalk_user` 调用第三方(骨架实现,仅打日志)
+4. **best-effort**:第三方调用 try/except 包裹,失败只记日志,不影响主流程
+5. **防骚扰**:默认 `sms/dingtalk=false`,只有用户在 `/notifications` 勾选才触发
+
+### API (REST + WebSocket)
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/notifications` | 列表(支持 `only_unread` / `type` / 分页) |
+| GET | `/api/notifications/unread` | 未读数(顶栏红点) |
+| POST | `/api/notifications/{id}/read` | 标已读 |
+| POST | `/api/notifications/read-all` | 全部标已读 |
+| GET | `/api/notifications/settings` | 我的所有事件偏好 |
+| PUT | `/api/notifications/settings/{ntype}` | 改某个事件的三组开关(in_app/sms/dingtalk) |
+| POST | `/api/notifications/announce` | admin 群发系统公告 |
+| GET | `/api/notifications/channels` | admin 列通道 |
+| POST | `/api/notifications/channels/{ctype}` | admin upsert 通道(配置 JSON) |
+| WS | `/ws/notifications?token=...` | 实时推送(连接时立即推 `notification.unread`;之后 `notification.new`) |
+
+### 前端
+
+#### 全局 store
+[frontend/src/stores/notifications.js](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/stores/notifications.js) (Zustand)：
+- `unreadCount` / `recent`(最近 10 条)/ `total`
+- `init()` 建立 WS + 3s 自动重连
+- `markRead(id)` / `markAllRead()`
+- 收到 `notification.new` 时未读+1,加入 recent,并把浏览器 tab 标题加 `[新消息]` 前缀
+
+#### 顶栏铃铛
+[frontend/src/components/NotificationBell.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/NotificationBell.jsx):
+- 顶栏右上角,用户名菜单左侧
+- 🔔 图标 + 红色徽标(超出显示 99+)
+- 点击下拉框:最近 10 条 + 全部已读 + 查看全部
+- 点击单条 → 调 `markRead` + 按 `target_type` 跳转:
+  - `user` + `account_apply` → /admin/users
+  - `followup_project` → /project-followups?project_id=X
+  - `project_pending` → /approvals
+  - 其他 project → /projects
+
+#### 完整通知页
+[frontend/src/pages/Notifications.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/Notifications.jsx):
+- 全部/未读 筛选 + 分页
+- 顶部折叠面板:每事件类型 3 个 checkbox(in_app/sms/dingtalk),实时存盘
+- 未提醒:"已配置部分外推"提示
+
+#### Admin 群发与通道配置
+[frontend/src/pages/NotificationAdmin.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/NotificationAdmin.jsx):
+- 群发公告表单(标题+内容 → /announce)
+- 通道列表(4 类钉钉/短信),点击「编辑」弹窗 JSON 配置
+
+#### 路由 + 菜单
+[frontend/src/App.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/App.jsx) + [frontend/src/components/Layout.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/Layout.jsx):
+- `/notifications`(所有角色)
+- `/admin/notifications`(仅 admin 菜单可见)
+- Layout 左侧菜单:`📣 通知管理`(admin) / `🔔 通知中心`(所有)
+
+### 数据库迁移
+
+[backend/app/main.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/main.py) `lifespan` 启动时:
+1. `users` 加 `phone` / `dingtalk_user_id`(若不存在)
+2. 创建 `notifications` / `notification_settings` / `notification_channels` 三表 + 索引
+3. 事件循环绑定(`set_event_loop`)
+
+### 部署/构建顺序
+
+1. 前端 build:`cd frontend && node node_modules/vite/bin/vite.js build` → 产出写到 `backend/static/`
+2. 重启 backend:`python -m uvicorn app.main:app --host 0.0.0.0 --port 8765`
+
+### 关键文件
+
+| 角色 | 文件 |
+|---|---|
+| 后端模型 | [models.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/models.py) |
+| 后端服务 | [services/notifications.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/services/notifications.py) |
+| 后端路由 | [routers/notifications_ws.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/notifications_ws.py) |
+| 后端 schemas | [schemas.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/schemas.py) |
+| 前端 store | [stores/notifications.js](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/stores/notifications.js) |
+| 前端铃铛 | [components/NotificationBell.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/NotificationBell.jsx) |
+| 前端通知页 | [pages/Notifications.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/Notifications.jsx) |
+| 前端管理页 | [pages/NotificationAdmin.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/NotificationAdmin.jsx) |
+| 前端 API | [api/index.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/api/index.jsx) |
+| 前端路由 | [App.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/App.jsx) |
+| 前端布局 | [components/Layout.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/Layout.jsx) |
+
+### 端到端验证(2026-08-21)
+
+1. jhliu 创建项目 → 审批人是 jluo → jluo `unread_count` +1,显示 "新项目待审批" ✅
+2. jluo 在 `/approvals` 通过项目 → jhliu `unread_count` +1,显示 "项目审批通过" ✅
+3. admin 群发公告 → 全体非 admin 用户各收到 1 条 `system_announcement` ✅
+4. `account_apply` / `password_reset` / `followup_viewed` 已就绪,后续真实流程触发即可
+
+### 后续扩展点
+
+- **钉钉企业应用工作通知**:在 `NotificationAdmin` 填 CorpID/AppKey/AppSecret + 用户dingtalk_user_id 即可启用(`_send_dingtalk_user` 已留接口)
+- **阿里云/腾讯云短信**:`_send_sms` 已留接口,填 access_key/secret/签名/模板即可投递(需 `pip install alibabacloud-dysmsapi / tencentcloud-sdk-python-sms`)
+- **实时性增强**:目前 WS 3s 重连,可改为心跳保活 + 指数退避
+- **广播优化**:系统公告 N>1000 时可改"延迟队列 + 按 chunk fanout",避免单次 commit 过大
+
+---
+
+## 19. 用户 ↔ 通知通道绑定（钉钉 / 短信）（2026-08-21）
+
+### 需求
+
+第 18 章已经接好「钉钉企业应用工作通知」+ 短信号通道,但钉钉工作通知需要具体到人的 userid(企业内每个成员都有唯一 staffId),短信需要手机号。本章把账号与钉钉/手机号打通,运维层面手动绑定。
+
+### 设计
+
+- `User` 表加 2 个字段:`phone`(短信)/ `dingtalk_user_id`(钉钉工作通知定向投递)
+- 「用户管理」列表加 2 列展示,支持 admin 在「编辑」弹窗里直接填写(手填即可,无需调用钉钉通讯录 API)
+- 普通账号登录后也能在「修改密码」弹窗侧加一个面板,自助补填自己的手机号(后续扩展)
+
+### 变更
+
+#### 后端
+- [schemas.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/schemas.py) `UserBase` / `UserUpdate` 加 `phone` + `dingtalk_user_id`
+- [routers/users.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/users.py) `update_user` 用 `model_fields_set` 判断是否显式传入,空字符串自动规范化为 None
+
+#### 前端
+- [pages/UserManagement.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/UserManagement.jsx)
+  - 列表新增 2 列:手机号 / 钉钉 userid(等宽字体显示)
+  - 编辑/新建弹窗新增 2 个输入框(注明"从钉钉管理后台获取")
+  - 表单 state 加 `phone` / `dingtalk_user_id`,handleSubmit 提交时一并 PATCH
+
+### 用法步骤
+
+1. 打开钉钉管理后台:通讯录 → 选中某员工 → 复制其 **userid**(也叫 staffId)
+2. 在系统「用户管理」→ 点「编辑」→ 填入「钉钉 userid」+ 「手机号」→ 保存
+3. 该用户的 user 一旦勾选「钉钉工作通知」开关(/notifications 个人偏好),后续事件触发时即可定向投递
+
+### 端到端验证
+
+刚才已跑通接口(admin token PUT /users/2 → 保存 phone + dingtalk_user_id → GET /users 回显成功)
+
+### 安全考虑
+
+- 字段对所有已登录用户可见(只读)— 不暴露只给 admin,因为手机号/钉钉 ID 需要本人确认才能正确
+- 写入仅 admin 可操作(PUT /users/{id} 走 `require_admin`)
+- 数据库列不加密,可在后续接入脱敏/加密(MVP 阶段不处理)
+
+### 后续扩展
+
+- **自助补填**:在用户「修改密码」弹窗加一个 `我的联系信息` 折叠面板,允许普通账号自助维护自己的 phone/dingtalk_user_id(admin 不参与)
+- **钉钉通讯录同步**:加一个『一键同步钉钉通讯录』按钮,admin 点击后调钉钉 `https://oapi.dingtalk.com/topapi/v2/user/list` 拉全量成员,以 `real_name` 与钉钉 `name` 模糊匹配,一次性预填
+- **HR 同步**:从企业 HR 系统按工号拉取手机号
+
+---
+
+## 20. 通知中心 Bug 修复与钉钉工作通知落地（2026-08-21）
+
+### 问题
+用户反馈:
+1. 刘建辉创建项目 → admin 没收到"新项目待审批"通知(只收到张三的)
+2. 钉钉工作通知未触发
+
+### 根因排查
+
+#### Bug 1: 自营项目流程不触发通知
+[backend/app/routers/forms.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/forms.py) `create_instance` 创建 `Project` 行后,**没有调用 `send_notification`**(只有渠道项目路径有)。  
+→ 修复:在 `db.add(project)` `db.commit()` 之后增加通知逻辑 + bug `inst is not defined` 引用错变量名(应为 `instance`)。
+
+#### Bug 2: 钉钉 userid 绑定后默认 settings 没开启
+用户绑定 `dingtalk_user_id` 后,该用户的 `notification_settings.dingtalk` 仍为 False,导致推送被跳过。  
+→ 修复:[backend/app/routers/users.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/users.py) `update_user` 在保存 `dingtalk_user_id` 时,自动 upsert 该用户的全部事件 settings(dingtalk=true);清空时反之。
+
+#### Bug 3: SQLAlchemy session 跨 await 边界
+`_schedule_external` 把 ORM 对象传给 async 任务,导致 "This session is in 'prepared' state" 异常。  
+→ 修复:schedule 时只传普通 dict,async 任务内部用 `SessionLocal()` 重建 session 查 user + channel + 投递。
+
+#### Bug 4: 钉钉 gettoken 用 POST
+[backend/app/services/notifications.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/services/notifications.py) `_get_dingtalk_token` 原来用 `requests.post(url, json={...})`,但钉钉 `/gettoken` 要求 GET + query string,返回 `errcode=43001 "需要GET请求"`。  
+→ 修复:改为 `requests.get('https://oapi.dingtalk.com/gettoken?appkey=X&appsecret=Y')`。
+
+### 实施要点
+
+[backend/app/services/notifications.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/services/notifications.py):
+- 顶部 `import requests`
+- 同步版 `_send_dingtalk_sync(user, title, content, target_type)`:
+  - 用新 SessionLocal session 读 `notification_channels` 配置
+  - 解析 corp_id / agent_id / app_key / app_secret
+  - 进程级缓存 access_token(过期前 60s 续)
+  - 用 `POST /topapi/message/corpconversation/asyncsend_v2?access_token=...` 投递工作通知到 user.dingtalk_user_id
+  - 完整 try/except/finally,失败仅 log 不影响主流程
+- `_push_external_async` 改为传基本 dict(不再传 db/ORM)
+- `_schedule_external` 同步提取 `n.id`/`n.type.value`/`n.title`/`n.content`/`n.target_type` + setting 各通道开关
+
+[backend/app/routers/users.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/users.py) `update_user`:
+- `dingtalk_user_id` 变化时 upsert `notification_settings`(全部事件 dingtalk=true)
+- 清空时全量关 dingtalk 开关
+
+[backend/app/routers/forms.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/forms.py) `create_instance`:
+- `db.add(project)` + commit + refresh 后:
+  - 调用 `send_notification(...)` 通知 `approver_id`
+  - 用 `instance.template.name`(不是 `inst`)
+  - try/except 包裹
+
+### 端到端验证(2026-08-21 15:38)
+
+```
+[notifications] [external] async start user=1 ntype=password_reset sms=False dingtalk=True
+[notifications] [dingtalk.corp] cfg_row loaded: True
+[notifications] [dingtalk.corp] gettoken result: OK
+[notifications] [dingtalk.corp] POST result: {'errcode': 0, 'errmsg': 'ok', 'task_id': 3428280548869}
+[notifications] [dingtalk.corp] OK user=1 task_id=3428280548869
+```
+
+✅ 钉钉工作通知**已实际投递成功**(`errcode=0`),admin 用户的钉钉账号(`07260754937840`)应当收到「您的密码已被重置」文本通知。
+
+### 部署要点
+
+1. **数据迁移**:旧账号 binding 时只更新 dingtalk_user_id,**不会自动开 settings**(已修复为自动开启);旧账号需要 admin 重新触发保存(任何 put users/{id} 都能让绑定逻辑跑一次)
+2. **第一次拉取 access_token**:钉钉 gettoken 接口需要 corp_id,agent_id,app_key,app_secret 正确(从钉钉开放平台 → 应用 → 凭证信息获取)
+3. **企业应用 IP 白名单**:钉钉新企业应用默认 IP 白名单未开启 → 需在钉钉开放平台 → 应用安全 → IP 白名单加上服务器 IP(否则可能 88 错误)
+4. **用户 userid 来源**:从「钉钉管理后台」通讯录 → 用户详情 → userid;或在钉钉开放平台用 `userid_list` 接口反查
+
+### 后续可扩展
+
+- **多个 agentId 路由**:不同事件发到不同 agent(例如系统公告走「运营通知」应用,审批类走「OA 审批」应用)
+- **message 类型扩展**:目前只发 text,可加 oa 类型卡片、markdown 等
+- **撤回 / 更新消息**:钉钉支持撤回/更新已发工作通知(目前未做)
+
+---
+
+## 21. AI报表模型配置增强 + 启动环境修复（2026-08-22）
+
+### 本次调整
+
+围绕 `AI报表 -> 模型配置` 做了 4 组增强：
+
+1. 把报表页明确拆成：
+   - `标准报表`
+   - `AI 分析`
+   - `模型配置`
+2. 预置 3 个国内云端模型模板：
+   - `Kimi`
+   - `MiniMax`
+   - `DeepSeek`
+3. 每个模型增加 `测试连接` 按钮，返回响应耗时（ms）
+4. 修复本地后端启动环境，确保当前项目能继续跑起来
+
+### 前端变更
+
+[frontend/src/pages/Reports.jsx](file:///y:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/Reports.jsx)
+
+- `模型配置` 页签中新增「预置国内云端模型」区域
+- 每张预置卡片展示：
+  - 模型名称
+  - 默认模型标识
+  - 默认接入地址
+  - `填写 Key 创建` 按钮
+- 下方单独保留 `自定义本地模型` 入口
+- 已配置模型列表新增：
+  - `测试连接`
+  - `编辑`
+  - `删除`
+- 测试结果会展示：
+  - 是否成功
+  - 响应耗时 `latency_ms`
+  - 简短返回摘要
+
+[frontend/src/api/index.jsx](file:///y:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/api/index.jsx)
+
+- 新增：
+  - `getAIModelPresets()`
+  - `testAIModelConfig(id, data)`
+
+### 后端变更
+
+[backend/app/schemas.py](file:///y:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/schemas.py)
+
+- 新增：
+  - `AIModelPresetResponse`
+  - `AIModelTestRequest`
+  - `AIModelTestResponse`
+
+[backend/app/routers/forms.py](file:///y:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/forms.py)
+
+- 新增预置模型常量：
+  - `Kimi` → `https://api.moonshot.ai/v1` + `kimi-k3`
+  - `MiniMax` → `https://api.minimax.io/v1` + `MiniMax-M3`
+  - `DeepSeek` → `https://api.deepseek.com` + `deepseek-v4-flash`
+- 新增接口：
+  - `GET /api/forms/ai-model-presets`
+  - `POST /api/forms/ai-models/{id}/test`
+- 测试接口逻辑：
+  - 走 OpenAI 兼容 `chat/completions`
+  - 发送固定提示词 `请只回复“连接成功”四个字。`
+  - 返回响应耗时和摘要
+- 修复兼容问题：
+  - 编辑模型时若 `api_key` 传空字符串，后端保持原值，不再覆盖为空
+
+### 页面职责调整
+
+- 左侧导航保留：
+  - `AI报表`
+  - `表单管理`
+- `表单管理` 恢复为原有能力，不再承载模型配置
+- 所有 AI 模型配置、AI 分析入口都收口到 `AI报表`
+
+### 验证结果
+
+- 前端 `npm.cmd run build` 通过
+- 后端 Python 语法检查通过
+- 静态构建产物已包含以下关键文案：
+  - `预置国内云端模型`
+  - `填写 Key 创建`
+  - `新建本地模型`
+  - `测试连接`
+
+### 启动环境踩坑记录
+
+这次后端重启过程中，连续踩到 4 个环境问题：
+
+1. `backend/start_server.py` 里仍写死旧的 `Z:` 盘路径
+2. 全局 `hermes-agent` Python 环境可运行，但缺 `sqlalchemy`
+3. `backend/site_pkg` 虽然有很多依赖，但 `pydantic_core` 的二进制扩展不完整，不能直接替代完整虚拟环境
+4. 历史遗留的 `backend/.venv_fix` 指向旧用户目录 `C:\\Users\\jwang\\...`，当前机器不可直接复用
+
+### 当前可用启动方式
+
+为避免继续依赖坏掉的旧环境，已在项目下重新创建本地环境：
+
+- 新环境路径：`backend/.venv_local`
+
+安装命令：
+
+```powershell
+& "C:\Users\admin\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe" -m venv "Y:\soft-RED\hermes\开发软件\渠道项目登记\backend\.venv_local"
+& "Y:\soft-RED\hermes\开发软件\渠道项目登记\backend\.venv_local\Scripts\python.exe" -m pip install -r "Y:\soft-RED\hermes\开发软件\渠道项目登记\backend\requirements.txt"
+```
+
+当前已验证可用的启动方式：
+
+```powershell
+Start-Process -WindowStyle Hidden -FilePath "Y:\soft-RED\hermes\开发软件\渠道项目登记\backend\.venv_local\Scripts\python.exe" `
+  -ArgumentList "-m","uvicorn","app.main:app","--host","0.0.0.0","--port","8000" `
+  -WorkingDirectory "Y:\soft-RED\hermes\开发软件\渠道项目登记\backend"
+```
+
+健康检查：
+
+```powershell
+Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:8000/api/health"
+```
+
+返回：
+
+```json
+{"status":"ok"}
+```
+
+### 明日继续建议
+
+优先继续这 3 项：
+
+1. 把 `AI 分析` 从当前结构化预览升级为真实模型调用
+2. 增加模型测速结果排序/最近一次测试时间展示
+3. 顺手修一下 `backend/start_server.py`，改为使用当前工作目录与 `.venv_local`，避免后续再次踩旧盘符问题

@@ -210,6 +210,24 @@ def apply_account(
     except Exception:
         pass
 
+    # 通知所有系统管理员 — 有新的账号申请待审批
+    try:
+        from app.services.notifications import send_notification
+        from app.models import UserRole, NotificationType
+        admins = db.query(User).filter(User.role == UserRole.admin, User.is_active == True).all()
+        for admin in admins:
+            send_notification(
+                db,
+                receiver_id=admin.id,
+                type=NotificationType.account_apply,
+                title="新账号申请待审批",
+                content="{0} 申请了账号 \"{1}\"，请尽快审批。".format(real_name, candidate),
+                target_type="user", target_id=user.id,
+            )
+        db.commit()
+    except Exception:
+        pass
+
     return ApplyAccountResponse(
         username=candidate,
         real_name=real_name,

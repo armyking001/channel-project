@@ -212,6 +212,26 @@ def create_project(
                  'initial_status': initial_status.value},
         request=request,
     )
+    # 通知审批人 — 仅当创建后立即进入 pending_approval(自营项目流程)
+    try:
+        if initial_status == ApprovalStatus.pending_approval and project.approver_id and project.approver_id != current_user.id:
+            from app.services.notifications import send_notification
+            from app.models import NotificationType
+            send_notification(
+                db,
+                receiver_id=project.approver_id,
+                type=NotificationType.project_pending,
+                title="新项目待审批",
+                content="{0} 提交了项目「{1}」, 请尽快审批。".format(
+                    current_user.real_name or current_user.username,
+                    project.project_name,
+                ),
+                target_type="project", target_id=project.id,
+                extra={"creator_id": current_user.id, "creator_name": current_user.real_name},
+            )
+            db.commit()
+    except Exception:
+        pass
     return project
 
 @router.put("/{project_id}", response_model=ProjectResponse)
@@ -426,6 +446,25 @@ def submit_project(
         target_type='project', target_id=project.id, target_name=project.project_name,
         request=request,
     )
+    # 通知审批人
+    try:
+        if project.approver_id and project.approver_id != current_user.id:
+            from app.services.notifications import send_notification
+            from app.models import NotificationType
+            send_notification(
+                db,
+                receiver_id=project.approver_id,
+                type=NotificationType.project_pending,
+                title="新项目待审批",
+                content="{0} 提交了项目「{1}」, 请尽快审批。".format(
+                    current_user.real_name or current_user.username,
+                    project.project_name,
+                ),
+                target_type="project", target_id=project.id,
+            )
+            db.commit()
+    except Exception:
+        pass
     return project
 
 @router.post("/{project_id}/approve", response_model=ProjectResponse)

@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from app.database import engine, Base
 from app.routers import auth, users, projects, approvals, reports, file_storage, forms, storage_zones, project_followups, system as system_router
 from app.routers.audit import router as audit_router
+from app.routers.notifications_ws import router as notifications_router, ws_router as notifications_ws_router
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
@@ -36,6 +37,14 @@ async def lifespan(app: FastAPI):
         ensure_audit_table()
     except Exception as e:
         print(f"[warn] ensure_audit_table 失败: {e}")
+    # 把当前事件循环交给 NotificationManager,便于同步 DB 操作 schedule 异步 WS 推送
+    try:
+        import asyncio as _asyncio
+        from app.services.notifications import set_event_loop
+        set_event_loop(_asyncio.get_running_loop())
+        print('[startup] NotificationManager 绑定事件循环 OK')
+    except Exception as e:
+        print(f'[warn] 绑定 NotificationManager 事件循环失败: {e}')
     # 启动时创建所有表
     Base.metadata.create_all(bind=engine)
     # 兼容旧库：手动加 is_rejected 列
@@ -466,6 +475,80 @@ async def lifespan(app: FastAPI):
             traceback.print_exc()
     finally:
         db.close()
+    # 兼容旧库：users 加 phone / dingtalk_user_id 列
+    try:
+        import sqlite3 as _sqlite3
+        from app.database import load_config
+        cfg = load_config()
+        path = cfg["database"]["url"].replace("sqlite:///", "", 1)
+        if path.startswith("/") and len(path) > 2 and path[2] == ":":
+            path = path[1:]
+        c = _sqlite3.connect(path, timeout=10)
+        try:
+            cols = [r[1] for r in c.execute("PRAGMA table_info(users)").fetchall()]
+            if 'phone' not in cols:
+                c.execute("ALTER TABLE users ADD COLUMN phone VARCHAR(20)")
+                print('[migrate] users.phone 列已添加')
+            if 'dingtalk_user_id' not in cols:
+                c.execute("ALTER TABLE users ADD COLUMN dingtalk_user_id VARCHAR(100)")
+                print('[migrate] users.dingtalk_user_id 列已添加')
+            c.commit()
+        finally:
+            c.close()
+    except Exception as e:
+        print(f"[warn] 迁移 users.phone/dingtalk_user_id 失败: {e}")
+    # 创建 notifications / notification_settings / notification_channels 表
+    try:
+        import sqlite3 as _sqlite3
+        from app.database import load_config
+        cfg = load_config()
+        path = cfg["database"]["url"].replace("sqlite:///", "", 1)
+        if path.startswith("/") and len(path) > 2 and path[2] == ":":
+            path = path[1:]
+        c = _sqlite3.connect(path, timeout=10)
+        try:
+            c.execute("""CREATE TABLE IF NOT EXISTS notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                receiver_id INTEGER NOT NULL REFERENCES users(id),
+                type VARCHAR(50) NOT NULL,
+                title VARCHAR(200) NOT NULL,
+                content TEXT,
+                target_type VARCHAR(50),
+                target_id INTEGER,
+                is_read INTEGER NOT NULL DEFAULT 0,
+                read_at DATETIME,
+                extra TEXT,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_notifications_receiver_id ON notifications(receiver_id)")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_notifications_type ON notifications(type)")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_notifications_is_read ON notifications(is_read)")
+            c.execute("""CREATE TABLE IF NOT EXISTS notification_settings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                type VARCHAR(50) NOT NULL,
+                in_app INTEGER NOT NULL DEFAULT 1,
+                sms INTEGER NOT NULL DEFAULT 0,
+                dingtalk INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )""")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_notification_settings_user_id ON notification_settings(user_id)")
+            c.execute("""CREATE TABLE IF NOT EXISTS notification_channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                type VARCHAR(20) NOT NULL UNIQUE,
+                name VARCHAR(100) NOT NULL,
+                config TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )""")
+            c.commit()
+            print('[migrate] notifications 三表已就绪')
+        finally:
+            c.close()
+    except Exception as e:
+        print(f"[warn] 创建 notifications 表失败: {e}")
     # 启动时只做一次 connect，结束后 dispose，避免文件句柄长期持有
     engine.dispose()
     yield
@@ -477,6 +560,14 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan
 )
+
+
+@app.on_event("startup")
+async def _register_event_loop():
+    """把当前事件循环交给 NotificationManager,便于在同步 DB 操作中 schedule 异步 WS 推送"""
+    from app.services.notifications import set_event_loop
+    import asyncio
+    set_event_loop(asyncio.get_running_loop())
 
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -520,6 +611,8 @@ app.include_router(system_router.router)
 app.include_router(forms.router)
 app.include_router(storage_zones.router)
 app.include_router(project_followups.router)
+app.include_router(notifications_router)
+app.include_router(notifications_ws_router)
 
 @app.get("/api/health")
 def health_check():

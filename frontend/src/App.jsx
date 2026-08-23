@@ -11,6 +11,8 @@ import FormTemplates from './pages/FormTemplates'
 import FormBuilder from './pages/FormBuilder'
 import StorageZones from './pages/StorageZones'
 import ProjectFollowups from './pages/ProjectFollowups'
+import Notifications from './pages/Notifications'
+import NotificationAdmin from './pages/NotificationAdmin'
 import Layout from './components/Layout'
 
 function ProtectedRoute({ children }) {
@@ -45,6 +47,8 @@ function App() {
           <Route path="/admin/forms/builder" element={<FormBuilder />} />
           <Route path="/admin/forms/builder/:id" element={<FormBuilder />} />
           <Route path="/admin/storage-zones" element={<StorageZones />} />
+          <Route path="/notifications" element={<Notifications />} />
+          <Route path="/admin/notifications" element={<NotificationAdmin />} />
         </Route>
       </Routes>
     </HashRouter>

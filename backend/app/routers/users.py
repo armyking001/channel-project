@@ -139,6 +139,40 @@ def update_user(
         if user_data.is_active != user.is_active:
             changes['is_active'] = {'old': user.is_active, 'new': user_data.is_active}
         user.is_active = user_data.is_active
+    # 通知通道绑定字段:手机号 / 钉钉 userid(允许清空字符串)
+    if 'phone' in updated_fields:
+        new_phone = (user_data.phone or '').strip() or None
+        if new_phone != user.phone:
+            changes['phone'] = {'old': user.phone, 'new': new_phone}
+        user.phone = new_phone
+    if 'dingtalk_user_id' in updated_fields:
+        new_did = (user_data.dingtalk_user_id or '').strip() or None
+        if new_did != user.dingtalk_user_id:
+            changes['dingtalk_user_id'] = {'old': user.dingtalk_user_id, 'new': new_did}
+        user.dingtalk_user_id = new_did
+        # 钉钉 userid 一旦绑定,自动为该用户开启"所有事件类型"的 dingtalk 开关(否则用户填了 userid 但没勾选,等于没配)
+        if new_did:
+            from app.models import NotificationSetting, NotificationType
+            for ntype in NotificationType:
+                row = db.query(NotificationSetting).filter(
+                    NotificationSetting.user_id == user.id,
+                    NotificationSetting.type == ntype,
+                ).first()
+                if not row:
+                    row = NotificationSetting(
+                        user_id=user.id, type=ntype,
+                        in_app=True, sms=False, dingtalk=True,
+                    )
+                    db.add(row)
+                else:
+                    if not row.dingtalk:
+                        row.dingtalk = True
+        # 反之:解绑时自动关闭 dingtalk 开关
+        elif not new_did:
+            from app.models import NotificationSetting
+            db.query(NotificationSetting).filter(
+                NotificationSetting.user_id == user.id
+            ).update({NotificationSetting.dingtalk: False}, synchronize_session=False)
     if user_data.password:
         user.password_hash = hash_password(user_data.password)
         user.pending_password = None  # 审批完成，清除明文密码
@@ -340,4 +374,20 @@ def reset_password(
         target_type='user', target_id=user.id, target_name=f"{user.real_name}({user.username})",
         request=request,
     )
+    # 通知被重置用户
+    try:
+        from app.services.notifications import send_notification
+        from app.models import NotificationType
+        send_notification(
+            db,
+            receiver_id=user.id,
+            type=NotificationType.password_reset,
+            title="您的密码已被重置",
+            content="系统管理员已将您的密码重置为新的临时密码,请尽快登录并修改。新密码已发放到您手上,请妥善保管。",
+            target_type="user", target_id=user.id,
+            extra={"admin_id": current_user.id, "admin_name": current_user.real_name},
+        )
+        db.commit()
+    except Exception:
+        pass
     return MessageResponse(message="密码已重置")

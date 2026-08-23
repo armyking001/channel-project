@@ -62,7 +62,7 @@ export default function UserManagement() {
   const [users, setUsers] = useState([])
   const [showModal, setShowModal] = useState(false)
   const [editUser, setEditUser] = useState(null)
-  const [form, setForm] = useState({ username: '', password: '', real_name: '', role: 'normal', parent_id: '' })
+  const [form, setForm] = useState({ username: '', password: '', real_name: '', role: 'normal', parent_id: '', phone: '', dingtalk_user_id: '' })
 
   // 重置密码弹窗状态
   const [showResetPwd, setShowResetPwd] = useState(false)
@@ -92,19 +92,32 @@ export default function UserManagement() {
 
   const openCreate = () => {
     setEditUser(null)
-    setForm({ username: '', password: '', real_name: '', role: 'normal', parent_id: '' })
+    setForm({ username: '', password: '', real_name: '', role: 'normal', parent_id: '', phone: '', dingtalk_user_id: '' })
     setShowModal(true)
   }
 
   const openEdit = (u) => {
     setEditUser(u)
-    setForm({ username: u.username, password: '', real_name: u.real_name, role: u.role, parent_id: u.parent_id || '' })
+    setForm({
+      username: u.username,
+      password: '',
+      real_name: u.real_name,
+      role: u.role,
+      parent_id: u.parent_id || '',
+      phone: u.phone || '',
+      dingtalk_user_id: u.dingtalk_user_id || '',
+    })
     setShowModal(true)
   }
 
   const handleSubmit = async () => {
     try {
-      const data = { ...form, parent_id: form.parent_id || null }
+      const data = {
+        ...form,
+        parent_id: form.parent_id || null,
+        phone: form.phone || null,
+        dingtalk_user_id: form.dingtalk_user_id || null,
+      }
       if (!data.password) delete data.password
       if (editUser) {
         await updateUser(editUser.id, data)
@@ -501,6 +514,8 @@ export default function UserManagement() {
               <th className="px-4 py-3 text-left">姓名</th>
               <th className="px-4 py-3 text-left">角色</th>
               <th className="px-4 py-3 text-left">上级</th>
+              <th className="px-4 py-3 text-left">手机号</th>
+              <th className="px-4 py-3 text-left">钉钉 userid</th>
               <th className="px-4 py-3 text-left">状态</th>
               <th className="px-4 py-3 text-left">创建时间</th>
               {isAdmin && <th className="px-4 py-3 text-center">操作</th>}
@@ -543,6 +558,12 @@ export default function UserManagement() {
                   <td className="px-4 py-3 text-gray-500">
                     {u.parent_id ? users.find(x => x.id === u.parent_id)?.real_name || '-' : '-'}
                   </td>
+                  <td className="px-4 py-3 text-gray-500 font-mono text-xs">
+                    {u.phone || <span className="text-gray-300">-</span>}
+                  </td>
+                  <td className="px-4 py-3 text-gray-500 font-mono text-xs max-w-[120px] truncate" title={u.dingtalk_user_id || ''}>
+                    {u.dingtalk_user_id || <span className="text-gray-300">-</span>}
+                  </td>
                   <td className="px-4 py-3">
                     <StatusBadge user={u} />
                   </td>
@@ -579,7 +600,7 @@ export default function UserManagement() {
               )
             })}
             {filteredUsers.length === 0 && (
-              <tr><td colSpan={isAdmin ? 8 : 7} className="text-center text-gray-400 py-8">
+              <tr><td colSpan={isAdmin ? 10 : 9} className="text-center text-gray-400 py-8">
                 {filterTab === 'pending' ? '暂无待审批申请'
                   : filterTab === 'rejected' ? '暂无已驳回申请'
                   : '暂无用户'}
@@ -752,6 +773,32 @@ export default function UserManagement() {
                     <option key={x.id} value={x.id}>{x.real_name} ({ROLE_MAP[x.role]})</option>
                   ))}
                 </select>
+              </div>
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">
+                  手机号
+                  <span className="text-xs text-gray-400 ml-1">（短信通知用）</span>
+                </label>
+                <input
+                  value={form.phone || ''}
+                  onChange={e => setForm(f => ({ ...f, phone: e.target.value }))}
+                  className="w-full border rounded px-3 py-2 font-mono"
+                  placeholder="例如：13812345678"
+                  maxLength={20}
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">
+                  钉钉 userid
+                  <span className="text-xs text-gray-400 ml-1">（钉钉工作通知用，从钉钉管理后台获取）</span>
+                </label>
+                <input
+                  value={form.dingtalk_user_id || ''}
+                  onChange={e => setForm(f => ({ ...f, dingtalk_user_id: e.target.value }))}
+                  className="w-full border rounded px-3 py-2 font-mono"
+                  placeholder="例如：0123456789"
+                  maxLength={100}
+                />
               </div>
             </div>
             <div className="flex justify-end space-x-2 mt-6">

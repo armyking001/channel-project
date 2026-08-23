@@ -6,13 +6,16 @@ import json
 import logging
 import traceback
 import os
+import time
+import requests
 
 from app.database import get_db
-from app.models import User, UserRole, FormTemplate, FormInstance, FileStorageConfig, StorageMode, StorageZone, ApprovalStatus
+from app.models import User, UserRole, FormTemplate, FormInstance, FileStorageConfig, StorageMode, StorageZone, ApprovalStatus, AIModelConfig
 from app.schemas import (
     FormTemplateCreate, FormTemplateUpdate, FormTemplateResponse,
     FormInstanceCreate, FormInstanceResponse, FormInstanceListResponse,
-    MessageResponse,
+    MessageResponse, AIModelConfigCreate, AIModelConfigUpdate, AIModelConfigResponse,
+    AIModelPresetResponse, AIModelTestRequest, AIModelTestResponse,
 )
 from app.auth import get_current_user, require_admin
 from app.services.form_file_storage import (
@@ -25,6 +28,130 @@ from app.services.file_storage import (
 
 router = APIRouter(prefix="/api/forms", tags=["表单生成器"])
 log = logging.getLogger("forms")
+
+AI_MODEL_PRESETS = [
+    {
+        "key": "kimi",
+        "name": "Kimi",
+        "provider": "kimi",
+        "model_type": "cloud",
+        "base_url": "https://api.moonshot.ai/v1",
+        "model_name": "kimi-k3",
+        "description": "Moonshot 官方 OpenAI 兼容接口，适合中文分析和长上下文场景。",
+        "notes": "只需填写 API Key 即可运行。",
+        "recommended_timeout_seconds": 90,
+        "recommended_temperature": 0.2,
+    },
+    {
+        "key": "minimax",
+        "name": "MiniMax",
+        "provider": "minimax",
+        "model_type": "cloud",
+        "base_url": "https://api.minimax.io/v1",
+        "model_name": "MiniMax-M3",
+        "description": "MiniMax 官方 OpenAI 兼容接口，适合多模态与高上下文分析。",
+        "notes": "只需填写 API Key 即可运行。",
+        "recommended_timeout_seconds": 90,
+        "recommended_temperature": 0.2,
+    },
+    {
+        "key": "deepseek",
+        "name": "DeepSeek",
+        "provider": "deepseek",
+        "model_type": "cloud",
+        "base_url": "https://api.deepseek.com",
+        "model_name": "deepseek-v4-flash",
+        "description": "DeepSeek 官方 OpenAI 兼容接口，默认使用速度较快的 v4-flash。",
+        "notes": "只需填写 API Key 即可运行。",
+        "recommended_timeout_seconds": 60,
+        "recommended_temperature": 0.2,
+    },
+]
+
+
+def _mask_secret(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return value
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:4]}{'*' * (len(value) - 8)}{value[-4:]}"
+
+
+def _serialize_ai_model(model: AIModelConfig):
+    return {
+        "id": model.id,
+        "name": model.name,
+        "model_type": model.model_type,
+        "provider": model.provider,
+        "base_url": model.base_url,
+        "model_name": model.model_name,
+        "api_key": _mask_secret(model.api_key),
+        "temperature": model.temperature,
+        "max_tokens": model.max_tokens,
+        "timeout_seconds": model.timeout_seconds,
+        "is_enabled": model.is_enabled,
+        "is_default": model.is_default,
+        "notes": model.notes,
+        "created_by": model.created_by,
+        "created_at": model.created_at,
+        "updated_at": model.updated_at,
+        "creator": model.creator,
+    }
+
+
+def _get_preset_by_key(preset_key: str):
+    return next((item for item in AI_MODEL_PRESETS if item["key"] == preset_key), None)
+
+
+def _build_chat_completion_url(base_url: Optional[str]) -> str:
+    if not base_url:
+        raise HTTPException(status_code=400, detail="模型未配置接入地址")
+    root = base_url.rstrip("/")
+    if root.endswith("/chat/completions"):
+        return root
+    if root.endswith("/v1"):
+        return f"{root}/chat/completions"
+    return f"{root}/chat/completions"
+
+
+def _build_test_payload(model: AIModelConfig, prompt: str) -> dict:
+    payload = {
+        "model": model.model_name,
+        "messages": [
+            {"role": "system", "content": "你是一个用于检测接口连通性和响应速度的助手。请尽量简短回答。"},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": float(model.temperature or 0.2),
+        "stream": False,
+    }
+    if model.max_tokens:
+        payload["max_tokens"] = int(model.max_tokens)
+    else:
+        payload["max_tokens"] = 128
+    if model.provider == "deepseek":
+        payload["reasoning_effort"] = "low"
+        payload["thinking"] = {"type": "disabled"}
+    return payload
+
+
+def _extract_response_preview(data: dict) -> Optional[str]:
+    try:
+        choices = data.get("choices") or []
+        if not choices:
+            return None
+        message = choices[0].get("message") or {}
+        content = message.get("content")
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    parts.append(item.get("text", ""))
+            content = "".join(parts)
+        if content is None:
+            return None
+        return str(content)[:200]
+    except Exception:
+        return None
 
 
 # ============ 模板 CRUD ============
@@ -101,6 +228,168 @@ def delete_template(template_id: int, db: Session = Depends(get_db),
     db.commit()
     log.info(f"[delete_template] id={template_id}")
     return {"message": "已删除"}
+
+
+# ============ AI 模型配置 ============
+
+@router.get("/ai-models", response_model=List[AIModelConfigResponse])
+def list_ai_models(enabled_only: bool = False,
+                   db: Session = Depends(get_db),
+                   current_user: User = Depends(get_current_user)):
+    q = db.query(AIModelConfig).order_by(AIModelConfig.is_default.desc(), AIModelConfig.id.asc())
+    if enabled_only or current_user.role != UserRole.admin:
+        q = q.filter(AIModelConfig.is_enabled == True)
+    return [_serialize_ai_model(item) for item in q.all()]
+
+
+@router.get("/ai-model-presets", response_model=List[AIModelPresetResponse])
+def list_ai_model_presets(current_user: User = Depends(require_admin)):
+    return AI_MODEL_PRESETS
+
+
+@router.post("/ai-models", response_model=AIModelConfigResponse)
+def create_ai_model(data: AIModelConfigCreate,
+                    db: Session = Depends(get_db),
+                    current_user: User = Depends(require_admin)):
+    if data.is_default:
+        db.query(AIModelConfig).update({AIModelConfig.is_default: False})
+    model = AIModelConfig(
+        name=data.name,
+        model_type=data.model_type,
+        provider=data.provider,
+        base_url=data.base_url,
+        model_name=data.model_name,
+        api_key=data.api_key,
+        temperature=data.temperature,
+        max_tokens=data.max_tokens,
+        timeout_seconds=data.timeout_seconds,
+        is_enabled=data.is_enabled,
+        is_default=data.is_default,
+        notes=data.notes,
+        created_by=current_user.id,
+    )
+    db.add(model)
+    db.commit()
+    db.refresh(model)
+    return _serialize_ai_model(model)
+
+
+@router.put("/ai-models/{model_id}", response_model=AIModelConfigResponse)
+def update_ai_model(model_id: int,
+                    data: AIModelConfigUpdate,
+                    db: Session = Depends(get_db),
+                    current_user: User = Depends(require_admin)):
+    model = db.query(AIModelConfig).filter(AIModelConfig.id == model_id).first()
+    if not model:
+        raise HTTPException(status_code=404, detail="AI 模型配置不存在")
+
+    if data.is_default:
+        db.query(AIModelConfig).filter(AIModelConfig.id != model_id).update({AIModelConfig.is_default: False})
+
+    for field in (
+        "name", "model_type", "provider", "base_url", "model_name", "temperature",
+        "max_tokens", "timeout_seconds", "is_enabled", "is_default", "notes"
+    ):
+        value = getattr(data, field)
+        if value is not None:
+            setattr(model, field, value)
+    if data.api_key is not None and data.api_key != "":
+        model.api_key = data.api_key
+
+    db.commit()
+    db.refresh(model)
+    return _serialize_ai_model(model)
+
+
+@router.delete("/ai-models/{model_id}", response_model=MessageResponse)
+def delete_ai_model(model_id: int,
+                    db: Session = Depends(get_db),
+                    current_user: User = Depends(require_admin)):
+    model = db.query(AIModelConfig).filter(AIModelConfig.id == model_id).first()
+    if not model:
+        raise HTTPException(status_code=404, detail="AI 模型配置不存在")
+    db.delete(model)
+    db.commit()
+    return {"message": "已删除"}
+
+
+@router.post("/ai-models/{model_id}/test", response_model=AIModelTestResponse)
+def test_ai_model(model_id: int,
+                  data: AIModelTestRequest,
+                  db: Session = Depends(get_db),
+                  current_user: User = Depends(require_admin)):
+    model = db.query(AIModelConfig).filter(AIModelConfig.id == model_id).first()
+    if not model:
+        raise HTTPException(status_code=404, detail="AI 模型配置不存在")
+    if not model.api_key:
+        raise HTTPException(status_code=400, detail="请先填写 API Key 再测试")
+    if model.model_type.value == "local" and not model.base_url:
+        raise HTTPException(status_code=400, detail="请先填写本地模型接入地址")
+
+    url = _build_chat_completion_url(model.base_url)
+    payload = _build_test_payload(model, data.prompt)
+    headers = {
+        "Authorization": f"Bearer {model.api_key}",
+        "Content-Type": "application/json",
+    }
+    started = time.perf_counter()
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=int(model.timeout_seconds or 60))
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        preview = None
+        message = f"测试完成，接口响应耗时 {latency_ms} ms"
+        try:
+            body = resp.json()
+            preview = _extract_response_preview(body)
+            if resp.status_code >= 400:
+                err = body.get("error") if isinstance(body, dict) else None
+                if isinstance(err, dict):
+                    message = err.get("message") or err.get("type") or message
+        except Exception:
+            body = None
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=400, detail={
+                "success": False,
+                "message": message,
+                "latency_ms": latency_ms,
+                "status_code": resp.status_code,
+                "provider": model.provider,
+                "model_name": model.model_name,
+                "response_preview": preview,
+            })
+        return {
+            "success": True,
+            "message": message,
+            "latency_ms": latency_ms,
+            "status_code": resp.status_code,
+            "provider": model.provider,
+            "model_name": model.model_name,
+            "response_preview": preview,
+        }
+    except requests.Timeout:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        raise HTTPException(status_code=400, detail={
+            "success": False,
+            "message": f"测试超时，超过 {int(model.timeout_seconds or 60)} 秒未返回",
+            "latency_ms": latency_ms,
+            "status_code": None,
+            "provider": model.provider,
+            "model_name": model.model_name,
+            "response_preview": None,
+        })
+    except HTTPException:
+        raise
+    except Exception as e:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        raise HTTPException(status_code=400, detail={
+            "success": False,
+            "message": f"测试失败：{str(e)}",
+            "latency_ms": latency_ms,
+            "status_code": None,
+            "provider": model.provider,
+            "model_name": model.model_name,
+            "response_preview": None,
+        })
 
 
 # ============ 实例 CRUD ============
@@ -313,7 +602,29 @@ def create_instance(data: FormInstanceCreate, db: Session = Depends(get_db),
         )
         db.add(project)
         db.commit()
+        db.refresh(project)
         log.warning(f"[create_instance] projects row created: id={project.id} name={project.project_name} source=self")
+        # 通知审批人 — 自营项目流程
+        try:
+            from app.services.notifications import send_notification
+            from app.models import NotificationType
+            if approver_id and approver_id != current_user.id:
+                send_notification(
+                    db,
+                    receiver_id=approver_id,
+                    type=NotificationType.project_pending,
+                    title="新项目待审批",
+                    content="{0} 通过「{1}」提交了项目「{2}」,请尽快审批。".format(
+                        current_user.real_name or current_user.username,
+                        (instance.template.name if instance and instance.template else '自营项目登记表'),
+                        project.project_name,
+                    ),
+                    target_type="project", target_id=project.id,
+                    extra={"creator_id": current_user.id, "creator_name": current_user.real_name},
+                )
+                db.commit()
+        except Exception as _e:
+            log.warning(f"[create_instance] 通知失败: {_e}")
     except Exception as e:
         log.error(f"[create_instance] projects row 创建失败: {e}\n{traceback.format_exc()}")
 
