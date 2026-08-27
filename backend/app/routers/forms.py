@@ -10,7 +10,7 @@ import time
 import requests
 
 from app.database import get_db
-from app.models import User, UserRole, FormTemplate, FormInstance, FileStorageConfig, StorageMode, StorageZone, ApprovalStatus, AIModelConfig
+from app.models import User, UserRole, FormTemplate, FormInstance, FileStorageConfig, StorageMode, StorageZone, ApprovalStatus, AIModelConfig, Project, ProjectType, WinBidStatus
 from app.schemas import (
     FormTemplateCreate, FormTemplateUpdate, FormTemplateResponse,
     FormInstanceCreate, FormInstanceResponse, FormInstanceListResponse,
@@ -28,6 +28,30 @@ from app.services.file_storage import (
 
 router = APIRouter(prefix="/api/forms", tags=["表单生成器"])
 log = logging.getLogger("forms")
+
+
+def _resolve_config_for_instance(db: Session, instance_id: int) -> FileStorageConfig:
+    """根据 form_instance_id 反查关联 StorageZone 的 cfg；fallback 老单例"""
+    try:
+        instance = db.query(FormInstance).filter(FormInstance.id == instance_id).first()
+        if instance and instance.storage_zone_id:
+            zone = db.query(StorageZone).filter(StorageZone.id == instance.storage_zone_id).first()
+            if zone:
+                return FileStorageConfig(
+                    id=9999 + (zone.id or 0),
+                    mode=zone.mode or StorageMode.webdav,
+                    webdav_url=zone.webdav_url,
+                    webdav_port=zone.webdav_port,
+                    webdav_use_ssl=zone.webdav_use_ssl if zone.webdav_use_ssl is not None else True,
+                    webdav_username=zone.webdav_username,
+                    webdav_password=zone.webdav_password,
+                    webdav_base_path=zone.webdav_base_path,
+                    local_path=zone.local_path,
+                    template='{responsible_sales}+{project_name}+{date}',
+                )
+    except Exception as e:
+        log.exception(f"_resolve_config_for_instance 反查失败: {e}")
+    return _ensure_config(db)
 
 AI_MODEL_PRESETS = [
     {
@@ -434,23 +458,66 @@ def create_instance(data: FormInstanceCreate, db: Session = Depends(get_db),
     if not approver_id:
         raise HTTPException(status_code=422, detail="未找到可用审批人，请在用户管理中为该账号设置上级")
 
-    # === 2. 解析存储区域 ===
-    # 优先级：表单实例 data.storage_zone_id > 模板 storage_zone_id > 系统默认
+    # === 2. 解析项目来源（自营/渠道）与存储区域 ===
+    # 关键修复：根据「模板名」识别项目类型（之前无条件 source='self' 导致渠道项目也被记成自营），
+    # 同时根据 source 自动选择匹配的 storage_zone（避免渠道项目落到自营 zone 的问题）。
+    # 优先级：前端显式传的 storage_zone_id > 按 source 选出的默认 zone > 模板的 zone > 第一个启用的 zone。
     form_data = dict(data.data or {})
-    storage_zone_id = (
-        form_data.get('storage_zone_id')
-        or tpl.storage_zone_id
-    )
+
+    # ★ 关键修复 #1：按模板名（或前端显式传的 source）判断项目类型
+    explicit_source = (form_data.get('source') or '').strip().lower()
+    tpl_name = (tpl.name or '').strip()
+    if explicit_source in ('channel', 'self'):
+        project_source = explicit_source
+    elif '渠道' in tpl_name:
+        project_source = 'channel'
+    elif '自营' in tpl_name or '自建' in tpl_name:
+        project_source = 'self'
+    else:
+        project_source = 'self'  # 未知模板默认归到自营（兼容老规则）
+    log.warning(f"[create_instance] template='{tpl_name}' source={project_source}")
+
+    # ★ 关键修复 #2：按 source 选默认 zone。
+    # 由于 admin 创建模板时不一定配对了 storage_zone_id，这里根据 source 反查正确的 zone：
+    #   - channel（渠道）→ 找名为"渠道资料"的 zone
+    #   - self（自营）   → 找名为"自营资料"的 zone
+    def _find_default_zone(source):
+        if source == 'channel':
+            zone = db.query(StorageZone).filter(
+                StorageZone.is_active == True
+            ).filter(
+                (StorageZone.name.like('%渠道%')) | (StorageZone.webdav_base_path.like('%渠道%'))
+            ).first()
+            if zone:
+                return zone
+        elif source == 'self':
+            zone = db.query(StorageZone).filter(
+                StorageZone.is_active == True
+            ).filter(
+                (StorageZone.name.like('%自营%')) | (StorageZone.webdav_base_path.like('%自营%'))
+            ).first()
+            if zone:
+                return zone
+        return None
+
+    explicit_zone_id = form_data.get('storage_zone_id')
+    tpl_zone_id = tpl.storage_zone_id
+    default_zone = _find_default_zone(project_source)
+
+    # 优先级：前端显式 > 模板自带 > 按 source 默认查 > 第一个启用
+    storage_zone_id = explicit_zone_id or tpl_zone_id or (default_zone.id if default_zone else None)
     zone = None
     if storage_zone_id:
         zone = db.query(StorageZone).filter(StorageZone.id == storage_zone_id, StorageZone.is_active == True).first()
     if not zone:
+        zone = default_zone
+    if not zone:
         zone = db.query(StorageZone).filter(StorageZone.is_active == True).order_by(StorageZone.sort_order, StorageZone.id).first()
 
     # === 3. 创建 NAS 目录（严格调用渠道项目 create_project_folders）===
-    # 根据模板的 storage_zone_id 决定目录路径：
-    #   - 渠道项目登记表 (storage_zone_id=1 → 渠道资料) → 走默认 FileStorageConfig (id=1)
-    #   - 自建项目登记表 (storage_zone_id=3 → 自营资料) → 走对应的 FileStorageConfig
+    # 根据 zone 决定目录路径：
+    #   - 渠道项目（zone 名含"渠道"）→ 落到「渠道资料」目录
+    #   - 自营项目（zone 名含"自营"）→ 落到「自营资料」目录
 
     tender_folder = None
     bid_folder = None
@@ -491,7 +558,7 @@ def create_instance(data: FormInstanceCreate, db: Session = Depends(get_db),
             log.warning(f"[create_instance] folders ok (zone={target_zone.name}): tender={tender_folder} bid={bid_folder}")
         except Exception as e:
             log.error(f"[create_instance] 文件夹创建失败 (zone): {e}\n{traceback.format_exc()}")
-            raise HTTPException(status_code=500, detail=f"自建项目文件夹创建失败: {e}")
+            raise HTTPException(status_code=500, detail=f"项目文件夹创建失败: {e}")
     else:
         # 兜底：用默认 FileStorageConfig (id=1)
         storage_cfg = db.query(FileStorageConfig).filter(FileStorageConfig.id == 1).first()
@@ -570,7 +637,7 @@ def create_instance(data: FormInstanceCreate, db: Session = Depends(get_db),
             project_name=project_name,
             project_code=(form_data.get('project_code') or '').strip() or None,
             project_type=project_type,
-            source='self',  # 自建项目来源
+            source=project_source,  # ★ 修复：按模板名/前端 source 区分自营 vs 渠道，不再硬编码 self
             form_instance_id=instance.id,
             tender_time=_parse_date(form_data.get('tender_time')),
             bid_time=_parse_date(form_data.get('bid_time')),
@@ -603,8 +670,8 @@ def create_instance(data: FormInstanceCreate, db: Session = Depends(get_db),
         db.add(project)
         db.commit()
         db.refresh(project)
-        log.warning(f"[create_instance] projects row created: id={project.id} name={project.project_name} source=self")
-        # 通知审批人 — 自营项目流程
+        log.warning(f"[create_instance] projects row created: id={project.id} name={project.project_name} source={project_source}")
+        # 通知审批人 — 自营/渠道项目流程
         try:
             from app.services.notifications import send_notification
             from app.models import NotificationType
@@ -614,9 +681,10 @@ def create_instance(data: FormInstanceCreate, db: Session = Depends(get_db),
                     receiver_id=approver_id,
                     type=NotificationType.project_pending,
                     title="新项目待审批",
-                    content="{0} 通过「{1}」提交了项目「{2}」,请尽快审批。".format(
+                    content="{0} 通过「{1}」提交了{2}项目「{3}」,请尽快审批。".format(
                         current_user.real_name or current_user.username,
-                        (instance.template.name if instance and instance.template else '自营项目登记表'),
+                        (instance.template.name if instance and instance.template else ('渠道项目登记表' if project_source == 'channel' else '自营项目登记表')),
+                        '渠道' if project_source == 'channel' else '自营',
                         project.project_name,
                     ),
                     target_type="project", target_id=project.id,
@@ -639,6 +707,67 @@ def get_instance(instance_id: int, db: Session = Depends(get_db),
     inst = db.query(FormInstance).filter(FormInstance.id == instance_id).first()
     if not inst:
         raise HTTPException(status_code=404, detail="表单实例不存在")
+    return inst
+
+
+@router.put("/instances/{instance_id}", response_model=FormInstanceResponse)
+def update_instance(instance_id: int, payload: dict, db: Session = Depends(get_db),
+                    current_user: User = Depends(get_current_user)):
+    """更新表单实例 — 同时联动更新关联的 projects 表（让自营项目编辑走表单格式保持一致）
+
+    payload: { "data": { ...字段值 }, "approval_status": "pending_approval"|"approved"等（可选） }
+    """
+    inst = db.query(FormInstance).filter(FormInstance.id == instance_id).first()
+    if not inst:
+        raise HTTPException(status_code=404, detail="表单实例不存在")
+
+    # 1) 更新表单实例的 data
+    new_data = payload.get('data') or {}
+    # 同样清掉重复字段
+    for k in ('storage_zone_id', 'approver_id'):
+        new_data.pop(k, None)
+    inst.data = json.dumps(new_data, ensure_ascii=False)
+
+    # 2) 提取约定的中文字段映射（与 create_instance 行为一致）
+    proj_name = new_data.get('project_name') or new_data.get('name')
+    resp_sales = new_data.get('responsible_sales')
+    partner = new_data.get('partner_company')
+    project_type = new_data.get('project_type')
+    owner_cp = new_data.get('owner_contact_person')
+    owner_ci = new_data.get('owner_contact_info')
+    company_addr = new_data.get('company_address')
+    main_qual = new_data.get('main_qualification')
+    legal_rep = new_data.get('legal_representative')
+    contact_person = new_data.get('contact_person')
+    contact_info = new_data.get('contact_info')
+    project_overview = new_data.get('project_overview')
+    tender_time = new_data.get('tender_time')
+    bid_time = new_data.get('bid_time')
+
+    # 3) 联动更新关联的 projects 表（保持数据库双写一致）
+    proj = db.query(Project).filter(Project.form_instance_id == instance_id).first()
+    if proj:
+        if proj_name: proj.project_name = proj_name
+        if resp_sales: proj.responsible_sales = resp_sales
+        if partner is not None: proj.partner_company = partner
+        if project_type:
+            try:
+                proj.project_type = ProjectType(project_type)
+            except Exception:
+                pass
+        if owner_cp is not None: proj.owner_contact_person = owner_cp
+        if owner_ci is not None: proj.owner_contact_info = owner_ci
+        if company_addr is not None: proj.company_address = company_addr
+        if main_qual is not None: proj.main_qualification = main_qual
+        if legal_rep is not None: proj.legal_representative = legal_rep
+        if contact_person is not None: proj.contact_person = contact_person
+        if contact_info is not None: proj.contact_info = contact_info
+        if project_overview is not None: proj.project_overview = project_overview
+        if tender_time is not None: proj.tender_time = tender_time
+        if bid_time is not None: proj.bid_time = bid_time
+
+    db.commit()
+    db.refresh(inst)
     return inst
 
 
@@ -714,7 +843,7 @@ async def list_form_files(
     if not target_dir:
         return {"files": [], "total": 0, "target_dir": "", "project_name": str(instance_id)}
 
-    cfg = _ensure_config(db)
+    cfg = _resolve_config_for_instance(db, int(instance_id))
     files = []
 
     if cfg.mode == StorageMode.local:
@@ -789,22 +918,27 @@ async def upload_form_file(
                 out.write(content)
             uploaded.append({'name': safe_name, 'size': len(content), 'path': fpath})
         elif use_zone and zone.mode == StorageMode.webdav:
-            # 直接用 zone 的凭据上传
+            # 直接用 zone 的凭据上传（用底层 requests.put，绕过 webdav_request 无 data/headers 参数的问题）
             url = target_dir.rstrip('/') + '/' + safe_name
-            scheme = 'https' if zone.webdav_use_ssl else 'http'
-            host = (zone.webdav_url or '').replace('http://', '').replace('https://', '').rstrip('/')
-            host_part = f'{scheme}://{host}'
-            if zone.webdav_port:
-                host_part += f':{zone.webdav_port}'
-            # 修正 url 中的 host（用 zone 的 host 替换 cfg 中的 host）
-            # 实际 url 与 target_dir 一致
             try:
-                ok, msg = webdav_request('PUT', url, zone.webdav_username or '', zone.webdav_password or '',
-                                          data=content, headers={'Content-Type': 'application/octet-stream'})
-                if ok:
+                import requests as _req
+                import urllib3 as _u3
+                _u3.disable_warnings(_u3.exceptions.InsecureRequestWarning)
+                # 先确保父目录存在
+                from app.services.webdav_client import _ensure_parent_dir, _request, _auth
+                _ensure_parent_dir(url, zone)
+                resp = _req.put(
+                    url,
+                    data=content,
+                    auth=_auth(zone),
+                    headers={'Content-Type': 'application/octet-stream'},
+                    timeout=30,
+                    verify=False,
+                )
+                if 200 <= resp.status_code < 300:
                     uploaded.append({'name': safe_name, 'size': len(content), 'path': url})
                 else:
-                    log.error(f"[upload] WebDAV PUT 失败 {url}: {msg}")
+                    log.error(f"[upload] WebDAV PUT 失败 {url}: HTTP {resp.status_code}: {resp.text[:200]}")
             except Exception as e:
                 log.error(f"[upload] 异常 {url}: {e}")
         else:
@@ -849,7 +983,7 @@ async def delete_form_file(
     if not target_dir:
         raise HTTPException(400, detail="无法解析存储目录")
 
-    cfg = _ensure_config(db)
+    cfg = _resolve_config_for_instance(db, int(instance_id))
     safe_name = sanitize_path_segment(file_name)
 
     if cfg.mode == StorageMode.local:

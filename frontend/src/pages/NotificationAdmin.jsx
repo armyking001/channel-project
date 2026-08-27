@@ -79,7 +79,7 @@ export default function NotificationAdmin() {
   const [edit, setEdit] = useState(null)
   const [templates, setTemplates] = useState([])
   const [editingTpl, setEditingTpl] = useState(null)
-  const [globalCfg, setGlobalCfg] = useState({ title_prefix: '【销售项目管理系统V2.0通知】', apply_in_app: false })
+  const [globalCfg, setGlobalCfg] = useState({ title_prefix: '【销售项目管理系统V2.1通知】', apply_in_app: false })
   const [tab, setTab] = useState('tpls')
 
   const load = async () => {
@@ -239,7 +239,7 @@ export default function NotificationAdmin() {
                   maxLength={100}
                 />
                 <div className="mt-1 text-xs text-gray-500">
-                  默认: <code className="bg-white px-1 rounded">【销售项目管理系统V2.0通知】</code>
+                  默认: <code className="bg-white px-1 rounded">【销售项目管理系统V2.1通知】</code>
                 </div>
               </label>
               <label className="flex items-center gap-2">

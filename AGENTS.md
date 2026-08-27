@@ -580,7 +580,7 @@ if existing:
 
 ### ② 移除「+ 添加字段」功能 + 侧栏标题不换行 ✅
 
-- **需求**：跟单弹窗底部的「+ 添加字段」按钮不要；侧栏「V2.0」不要换行
+- **需求**：跟单弹窗底部的「+ 添加字段」按钮不要；侧栏「V2.1」不要换行
 - **实现**：
   - [ProjectFollowups.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/ProjectFollowups.jsx) 删除按钮、UI 区块、`useState`、`addExtraField`、`removeExtraField`
   - [Layout.jsx:79,83](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/Layout.jsx#L79) Logo `h-10`→`h-8`，h1 加 `whitespace-nowrap`
@@ -652,7 +652,7 @@ if existing:
 
 ---
 
-## 17. 用户手册：销售项目管理系统V2.0（2026-08-20）
+## 17. 用户手册：销售项目管理系统V2.1（2026-08-20）
 
 ### 需求
 
@@ -662,7 +662,7 @@ if existing:
 
 | 项目 | 内容 |
 |---|---|
-| 文件名 | `销售项目管理系统V2.0_用户手册.docx` |
+| 文件名 | `销售项目管理系统V2.1_用户手册.docx` |
 | 大小 | 46.2 KB |
 | 章节数 | 7 章 + 封面 + 目录 + 附录 |
 | 角色覆盖 | 普通账号（刘建辉）+ 重要账号（罗隽） |
@@ -683,9 +683,9 @@ if existing:
 
 - 生成脚本：`C:\Users\jwang\AppData\Local\Temp\gen_manual.py`（一次性脚本）
 - 输出文件：
-  - 桌面原始：`C:\Users\jwang\Desktop\销售项目管理系统V2.0_用户手册.docx`
-  - 项目目录：`Z:\soft-RED\hermes\开发软件\渠道项目登记\销售项目管理系统V2.0_用户手册.docx`
-  - **仓库内**：`销售项目管理系统V2.0_用户手册.docx`（已 commit `a40d57c`）
+  - 桌面原始：`C:\Users\jwang\Desktop\销售项目管理系统V2.1_用户手册.docx`
+  - 项目目录：`Z:\soft-RED\hermes\开发软件\渠道项目登记\销售项目管理系统V2.1_用户手册.docx`
+  - **仓库内**：`销售项目管理系统V2.1_用户手册.docx`（已 commit `a40d57c`）
 
 ### 工具
 
@@ -1100,10 +1100,903 @@ Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:8000/api/health"
 {"status":"ok"}
 ```
 
-### 明日继续建议
+## AI Agent 模块（项目级 + 报表级 + 系统提示词管理）
 
-优先继续这 3 项：
+本系统现在提供三层 AI 能力：
 
-1. 把 `AI 分析` 从当前结构化预览升级为真实模型调用
-2. 增加模型测速结果排序/最近一次测试时间展示
-3. 顺手修一下 `backend/start_server.py`，改为使用当前工作目录与 `.venv_local`，避免后续再次踩旧盘符问题
+1. **项目级 Agent**：`/api/agents/analyze`、`/api/agents/query`（ChromaDB + sentence-transformers 索引，单项目深度分析）
+2. **报表级 AI 对话框**：内嵌在「AI 报表」tab 的 AI 分析 / 标准报表 页签下，输入提示词即时生成左侧表格 + 右侧文字回复
+3. **系统提示词（角色设定）管理**：管理员可维护多个角色模板（商业分析专家 / 销售助理 / 财务审计视角 / 小销默认），所有 AI 调用都受其约束
+
+### 后端新增/修改文件
+
+| 文件 | 作用 |
+| --- | --- |
+| `backend/app/agents/report_agent.py` | 项目级 Agent 规则基准 + LLM 调用 + JSON 解析 |
+| `backend/app/services/agent_indexer.py` | Chroma 索引 + 上下文检索 + CLI（`--build/--get/--delete`） |
+| `backend/app/routers/agents.py` | `/api/agents/analyze` 与 `/api/agents/query` |
+| `backend/app/routers/agent_prompts.py` | 系统提示词 CRUD：`/api/agent-prompts` + `/api/agent-prompts/seed` |
+| `backend/app/routers/reports.py` | `_call_llm()` 真正调用 OpenAI 兼容大模型；`ai-analyze` / `ai-assistant` 拼装上下文 |
+| `backend/app/models.py` | 新增 `AgentPrompt` 表（角色提示词） |
+| `backend/app/schemas.py` | `AIAnalysisRequest / AIReportAssistantRequest` 增加 `system_prompt`；新增 `AgentPromptCreate / Update / Response` |
+| `backend/app/main.py` | 注册 `agents.router` + `agent_prompts.router` |
+| `backend/tests/test_agent.py` | happy path + 非法 JSON 重试用例 |
+| `backend/requirements.txt` | 新增 `chromadb / sentence-transformers / jieba / openai / pytest` |
+| `backend/start_server.py` | 默认端口改为 8765（避开 Hyper-V 保留 8000）；`backend_dir` 用 `os.path.dirname(__file__)` 计算，可移植 |
+| `backend/start_server2.py` | 临时启动脚本：设置 `PYTHONPATH` 指向 `.venv_local_new_pkgs/`（当主 venv 损坏时通过它跑） |
+
+### 前端新增/修改文件
+
+| 文件 | 作用 |
+| --- | --- |
+| `frontend/src/api/agents.js` | `analyzeProject`、`queryAgent` |
+| `frontend/src/api/index.jsx` | 补齐 AI 模型 + Agent 提示词相关导出（`listAgentPrompts` / `createAgentPrompt` / `seedAgentPrompts` / ...） |
+| `frontend/src/pages/Reports.jsx` | 右侧 AI 对话框 + 左侧红框（表格结果区），「🎭 角色设定」折叠面板 |
+| `frontend/src/App.jsx`、`frontend/src/components/Layout.jsx` | 移除独立 AI Agent 菜单与 `/agent-console` 路由，统一入口到「AI 报表 / AI 分析」 |
+
+### 系统提示词（角色设定）
+
+```text
+URL: /api/agent-prompts
+GET    /                  # 列出（普通用户仅看启用项）
+GET    /active?role_key=  # 取激活提示词
+POST   /                  # 创建（仅 admin）
+PUT    /{id}              # 修改（仅 admin）
+DELETE /{id}              # 删除（仅 admin）
+POST   /seed              # 一键写入 4 个预置角色
+```
+
+预置模板（`POST /api/agent-prompts/seed`）：
+
+- **商业分析专家**（`business_analyst`）— 关注金额、转化率、责任销售、跟单阶段联动
+- **销售助理**（`sales_expert`）— 关注跟单推进、责任人协同
+- **财务审计视角**（`finance_expert`）— 关注金额、回款、费用、合规
+- **小销（默认）**（`default`）— 通用销售助理风格
+
+前端「🎭 角色设定（系统提示词）」面板（红框上半部分）：
+
+- 顶部：当前激活的角色名 + 角色切换下拉
+- 「管理」按钮展开后：列表 / 编辑 / 新建 / 删除（仅 admin 可见）
+- 每次调用 LLM：`system message = 选中提示词的 content`；助手气泡顶部会显示「🎭 以「...」角色回复」
+
+### 真接大模型（_call_llm）
+
+`backend/app/routers/reports.py` 新增 `_call_llm(model_info, system_prompt, user_prompt, history=None)`：
+
+- 通过 `openai` SDK 按 `AIModelConfig.base_url / api_key / model_name / temperature / max_tokens / timeout_seconds` 调用
+- messages 顺序：`system → 最近 6 条历史 user/assistant → 当前 user_prompt`
+- user_prompt 自动拼装：数据范围（项目数 / 总金额 / 中标率 / 自营 / 渠道）+ 已选字段 + 预览样本（最多 20 行）+ 用户原始要求
+- 任何异常 / `choices=0` → 返回 `None`，上层 fallback 到骨架回答
+- 响应给前端前自动脱敏 `model.api_key`
+- 返回 `mode: "llm" | "skeleton"` 让前端显示来源
+
+当前可用模型（在「AI 报表 / 模型配置」可改）：
+
+- `Qwen3.6:35B-A3B`（base_url=`http://deepquick.com.cn:26810`，OpenAI 兼容）
+- `Qwen3.8-27B`（同上）
+- Kimi / MiniMax / DeepSeek 模板（cloud API，按需填 API Key 启用）
+
+### 启动与依赖
+
+环境变量（可选，不设则走默认）：
+
+```powershell
+$env:CHROMA_DIR               = "z:\soft-RED\hermes\开发软件\渠道项目登记\backend\chroma_store"
+$env:OPENAI_API_KEY           = "your_api_key_here"
+$env:AGENT_EMBEDDING_PROVIDER = "auto"        # auto / openai / local
+$env:AGENT_DEFAULT_TOP_K      = "5"
+```
+
+依赖安装：
+
+```powershell
+# 主 venv 完整依赖（含 chromadb / sentence-transformers / openai）
+& "z:\soft-RED\hermes\开发软件\渠道项目登记\backend\.venv_local\Scripts\python.exe" `
+    -m pip install -r "z:\soft-RED\hermes\开发软件\渠道项目登记\backend\requirements.txt"
+
+# 临时方案：把依赖装到 backend/.venv_local_new_pkgs，再用 start_server2.py 启动
+python -m pip install --target "z:\soft-RED\hermes\开发软件\渠道项目登记\backend\.venv_local_new_pkgs" openai webdavclient3 chromadb
+```
+
+启动后端（端口 8765 避开 Hyper-V 保留的 8000）：
+
+```powershell
+cd "z:\soft-RED\hermes\开发软件\渠道项目登记\backend"
+python start_server.py        # 主路径（使用 .venv_local）
+# 或
+python start_server2.py       # 备用路径（用 .venv_local_new_pkgs，需要 PYTHONPATH 自动设置）
+```
+
+健康检查：
+
+```powershell
+Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:8765/api/health"
+# 返回 {"status":"ok"}
+```
+
+前端入口：[http://127.0.0.1:8765/admin/](http://127.0.0.1:8765/admin/)（注意是 8765，不是 8756/8000）
+
+### 项目级 Agent 使用
+
+CLI 索引：
+
+```powershell
+cd "z:\soft-RED\hermes\开发软件\渠道项目登记\backend"
+python -m app.services.agent_indexer --build 123
+python -m app.services.agent_indexer --get 123 --top-k 5 --query "最近一次跟单进展"
+python -m app.services.agent_indexer --delete 123
+```
+
+HTTP 调用：
+
+```http
+POST /api/agents/analyze
+Content-Type: application/json
+{
+  "project_id": 123,
+  "model_id": null,                // 留空取默认模型
+  "system_prompt": null,           // 留空取 default 角色
+  "query": "本项目最大的风险点是什么？"
+}
+
+POST /api/agents/query
+{
+  "project_id": 123,
+  "model_id": null,
+  "query": "近期跟单进展？",
+  "top_k": 5
+}
+```
+
+测试：
+
+```powershell
+cd "z:\soft-RED\hermes\开发软件\渠道项目登记\backend"
+pytest -q tests/test_agent.py
+```
+
+### 说明与兜底
+
+- 默认会优先从已启用的 `AIModelConfig` 里取默认模型（按 `is_default desc, id asc`）
+- 若 OpenAI / 兼容模型不可用，会在 embedding 阶段回退到本地 `sentence-transformers`（`all-mpnet-base-v2`）
+- 项目级 Agent：LLM 调用最多重试 2 次；返回非法 JSON 同样最多重试 2 次，超出后返回 500 `AI 模型返回了无效的 JSON`
+- 报表级 `_call_llm`：失败/空响应自动 fallback 到骨架回答，前端用 `mode` 区分
+- `CHROMA_DIR` 目录需要持久化保存，否则重启后要重新建索引
+- 所有 `evidence.snippet` 都经过 `_truncate_snippet(<=300)` + `_mask_sensitive_numbers(8+ 位数字中段脱敏)`
+- 报表响应里 `model.api_key` 始终为 `None`（仅服务端调用时用真实 key）
+
+---
+
+## 渠道项目 WebDAV / 存储区域 多轮重构（2026-08-25）
+
+本轮针对渠道项目上传 401 + 路径错乱 + 模板 zone 不联动问题做了多轮迭代。
+
+### 核心目标
+
+- **多存储区域**：用户可定义多个 WebDAV zone（NAS1 / NAS2 等），每个 form template 绑定一个 zone
+- **新建项目时自动用模板的 zone**：不强制用户每次选
+- **编辑时 zone 可改**，但**不能动历史项目**（保持原 project.storage_zone_id）
+- **诊断接口**：扫描所有项目，列出路径正常/错误/空/未关联的项目，不修改 DB
+
+### 关键改动
+
+#### 1. 后端 `file_storage.py`
+
+- 新增 `_resolve_config_for_project(db, project_id)`：根据 project.storage_zone_id 反查 zone 拼装 FileStorageConfig（zone 优先；fallback 老单例 id=1）
+- `list-files` / `delete-file` / `upload` 三个端点都改用这个 helper，解决上传 401 问题
+- 新增 `POST /api/file-storage/diagnose-all`：扫描所有项目的 tender_folder / bid_folder，PROPFIND 校验，返回 status（ok/wrong/empty/unknown）+ msg + summary，**不修改 DB**
+- 新增 `POST /api/file-storage/rebuild-project-folders`：admin only，按 proj 当前 DB 字段 MKCOL 子目录
+- `preview-path` 端点：source='channel' 时也从「渠道项目登记表」FormTemplate 反查 zone（之前只对 self 生效）
+
+#### 2. 后端 `projects.py`
+
+- `create_project` 走新 helper `_resolve_config_for_project_create(data, db)`：
+ - `source='self'` → 用前端传来的 storage_zone_id
+ - `source='channel'`（默认）→ 前端没传 zone 时从「渠道项目登记表」FormTemplate 反查
+ - 兜底老单例 FileStorageConfig.id == 1
+- `ProjectCreate` schema 加 `source: Optional[str] = 'channel'`
+- 编辑模式 `update_project` 不会修改 `storage_zone_id`（保持原项目的 zone）
+
+#### 3. 后端 `forms.py`
+
+- `POST /api/forms/file-storage/upload`：之前 `webdav_request('PUT', url, user, pwd, data=...)` 调用错误（函数签名不支持 data/headers），改为底层 `requests.put(url, data=content, auth=...)`，绕过 webdav_request 限制
+- 同步添加 `_ensure_parent_dir` 辅助，确保父目录已建好
+- 自营项目（DynamicForm）走的是 form instance 路径，跟渠道项目 ProjectForm 路径完全独立
+
+#### 4. 前端 `api/index.jsx`
+
+- 新增 `listStorageZones`（保持原 axios 格式，返回 `{data: [...]}`）
+- 新增 `diagnoseFileStorage`（POST，返回 data）
+- 新增 `rebuildProjectFolders`（POST data）
+
+#### 5. 前端 `Projects.jsx`
+
+- 列表 useEffect：调 `fetchDiagnose` 拿所有项目的诊断结果
+- 表格新增「存储」列，根据诊断结果显示绿/红/灰徽章
+- 顶部 banner：有错项目时红色提示 +「🔄 重新扫描」按钮
+- 「渠道项目新建」按钮改成调用 DynamicForm（**与自营项目完全一致**）—— 加载「渠道项目登记表」模板，直接用 template.storage_zone
+- 「自营项目新建」保持 DynamicForm 路径不变
+
+#### 6. 前端 `ProjectForm.jsx`（用于**编辑**已有项目）
+
+- 接收 `diagnoseResult` + `onRebuilt` props
+- 文件管理区上方：根据 diagnoseResult 显示红/绿/灰提示
+ - 全部 ok：绿色细提示
+ - 未关联 zone：灰色提示
+ - 路径错误：红色框 + 完整路径 +「🔧 重建」按钮（admin only）+「不重建」按钮
+- 编辑模式下拉框：删除「存储区域」选择 UI（zone 由模板决定，不让用户改）
+- 删除 `listStorageZones` import 和相关 state
+
+### 关键设计决策
+
+| 决策 | 原因 |
+|---|---|
+| 渠道项目新建走 DynamicForm | 与自营项目逻辑一致，复用模板 zone 联动 |
+| ProjectForm 只保留用于编辑 | ProjectForm 有 withdraw/win_bid_status 等管理字段，新建不需要 |
+| zone 修改走表单编辑 | 在「表单管理 → 编辑表单 → 右下角存储区域」改模板 zone 即可全模板同步 |
+| 已建项目的 zone 不动 | 用户明确要求，避免每次升级系统要重新调整 |
+| diagnose 不修改 DB | 只读扫描，admin 选择性手动重建 |
+
+### 数据库现状（2026-08-25 21:59）
+
+```sql
+storage_zones:
+  (1, '172NAS/渠道资料', '/渠道资料', '172.16.10.252', 5006, 'trae')
+  (3, '172NAS/自营资料', '/自营资料', '172.16.10.252', 5006, 'trae')
+  (4, '172NAS/跟单存储', '/自营资料/跟单资料', '172.16.10.252', 5006, 'trae')
+  (5, '测试区域', 'soft-RED/test', '172.16.1.22', 5006, 'admin001')
+  (6, '默认存储', '/web', '172.16.1.22', 5006, 'admin001')
+
+form_templates:
+  id=1 name='渠道项目登记表' storage_zone_id=6   ← 默认存储 /web
+  id=3 name='自营项目登记表' storage_zone_id=6   ← 默认存储 /web
+  id=4 name='项目跟单登记表' storage_zone_id=5   ← 测试区域
+
+projects (示例):
+  (1, '自营测试', zone=5, path: soft-RED/test/刘建辉+...)
+  (2, '渠道项目测试', zone=1, path: 渠道资料/张林+...)  ← 旧渠道老单例
+  (3, '玩儿', zone=5, path: soft-RED/test/张林+...)
+  (4, '自营-默认', zone=6, path: web/系统管理员+自营-默认+...)
+```
+
+### 明日（2026-08-26）继续
+
+**问题：渠道项目走 DynamicForm 路径后，路径预览正确（`web/系统管理员+我企鹅+2026-08-25/招标资料`），但「无法建立文件夹，无法上传文件」，前端 alert「操作失败」**
+
+排查方向：
+1. 看后端 `app_debug.log` 找 `POST /api/forms/instances` + 后续 `POST /api/forms/file-storage/upload` 的 4xx/5xx 响应
+2. 排查 `forms.py::upload_form_files` 是不是调用 `webdav_request('PUT', ...)` 失败（之前修过但可能没修完整）
+3. 检查 `ensure_webdav_folders` 在新建 form_instance 时是否真的执行
+4. 检查 zone6（默认存储）credentials `admin001` 是否真的能写入 `/web` 路径
+5. 排查 `zone.webdav_username='admin001'` vs `zone.webdav_password` 是否正确
+
+**可能的根因**：
+- `forms.py::upload_form_files` 上传逻辑有问题
+- `create_form_folders` 创建子目录时 zone 的 credential 错误
+- MKCOL 后 PUT 时目录未真正建立（PUT 返回 409 Conflict）
+
+### 文件清单（修改过的）
+
+后端：
+- `backend/app/routers/file_storage.py`（新增 helper、diagnose-all、rebuild-project-folders、preview-path 增强）
+- `backend/app/routers/projects.py`（create_project 走 zone 解析）
+- `backend/app/routers/forms.py`（upload_form_files 修复 PUT 调用）
+- `backend/app/schemas.py`（ProjectCreate 加 source 字段）
+
+前端：
+- `frontend/src/api/index.jsx`（新增 3 个 API）
+- `frontend/src/pages/Projects.jsx`（诊断 banner + 徽章 + 渠道走 DynamicForm）
+- `frontend/src/components/ProjectForm.jsx`（诊断提示 + 重建按钮 + 删除 zone 选择）
+- `frontend/vite.config.js`（rollupOptions.treeshake: false 防止动态 import 误删）
+
+### 后端启动
+
+```powershell
+# 在 Y:\soft-RED\hermes\开发软件\渠道项目登记\backend 目录
+python start_server.py
+# 端口 8765
+```
+
+前端 bundle 由 vite 自动写到 `backend/static/assets/`，**无需重启后端**即可让前端生效。
+
+### 教训（本轮）
+
+1. **不要让用户复制粘贴代码**——每次粘贴都可能丢字符（如本轮丢 `import { listStorageZones }`），必须用 `Write` 工具直接覆盖
+2. **真正的根本原因往往很简单**（如本轮的 import 缺失），不要在表面现象上绕圈
+3. **Build size 对比**是发现 tree-shake / 重复定义的有效工具
+
+---
+
+## 22. 自营项目编辑/查看 → 对齐渠道项目样式（2026-08-26）
+
+### 背景
+
+自营项目（`source='self'`）和渠道项目（`source='channel'`）的业务行为需要完全一致：表单模板可独立配存储区域、文件按 zone 落 NAS、编辑/查看页面样式与渠道项目一致。但前几轮出现了：
+
+- 自营项目「编辑」「查看」弹窗加载慢（后端 `NameError` 或拉不到文件）
+- 自营项目「编辑」界面跟渠道项目不一致
+- 自营项目文件列表为空（后端用了全局 `FileStorageConfig`，没按 instance.storage_zone_id 反查 zone）
+
+### 核心目标
+
+1. **新建走同一逻辑**：渠道项目 / 自营项目新建都走 `DynamicForm`（按模板字段渲染 + 按模板 zone 落 NAS）
+2. **编辑/查看走同一逻辑**：两种项目的编辑/查看页面都和渠道 ProjectForm 一致（顶部蓝色「项目信息」只读卡 + 中标状态下拉 + 文件管理 + 关闭/完成按钮）
+3. **文件列表按 zone 取数**：自营项目列表接口按 `FormInstance.storage_zone_id` 反查 `StorageZone`，不再用全局 `FileStorageConfig`
+
+### 后端改动
+
+#### [backend/app/routers/forms.py](file:///y:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/forms.py)
+
+1. **新增 `_resolve_config_for_instance(db, instance_id)`**（模块顶部）：
+   - 按 `FormInstance.storage_zone_id` 反查 `StorageZone`
+   - 用 zone 字段（`webdav_url / webdav_port / webdav_username / webdav_password / webdav_base_path`）构造临时 `FileStorageConfig`
+   - fallback 到 `_ensure_config(db)`（全局单例）
+
+2. **`list_form_files`**：把第 822 行 `cfg = _ensure_config(db)` 改为 `cfg = _resolve_config_for_instance(db, int(instance_id))`
+   - 修复自营项目「文件列表为空」
+
+3. **`delete_form_file`**：第 962 行同样改为 `_resolve_config_for_instance`
+   - 保证删除时连正确的 zone
+
+4. **`create_instance`**：模板名前缀识别 `channel / self`，同步写入 `Project.source`，模板里字段值（项目名称 / 责任销售 / 合作单位 / 项目类型）按 label 反查并映射到约定英文 key
+
+5. **`update_instance`**：编辑时同步刷新关联 `Project` 的字段；管理员可改中标状态时通过 `PUT /api/projects/{id}` 持久化到 `Project.win_bid_status`（前端调用 `api.put('/projects/{id}', { win_bid_status })`）
+
+6. **`/api/forms/instances/{id}/project-info`**：返回关联 `Project`（项目名 / 类型 / 中标状态 / 审批状态 / 合作单位 / 联系人 / 联系方式），供 DynamicForm 顶部蓝色卡渲染
+
+7. **顶部导入修复**：第 13 行 `from app.models import ...` 补齐 `Project, ProjectType, WinBidStatus`，避免 `update_instance` 执行到 `db.query(Project)` 时 `NameError`
+
+### 前端改动
+
+#### [frontend/src/components/DynamicForm.jsx](file:///y:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/DynamicForm.jsx)
+
+1. **新增 state**：`projectInfo`（关联项目信息）+ `winBidDraft`（中标状态下拉草稿）
+
+2. **编辑模式（`instanceId && !readOnly`）**：
+   - 顶部蓝色「项目信息」卡：项目名称 / 类型 / 金额 / 合作公司 / 联系人 / 联系方式 + 中标状态下拉框（进行中 / 中标 / 未中标）
+   - 「管理员可修改中标状态」绿色徽章
+   - 渲染文件管理（不渲染普通字段分组 — `renderSection` 内部对非文件 section 在编辑模式返回 null）
+   - 不显示「审批人」
+   - 底部「取消 / 完成」按钮
+
+3. **查看模式（`readOnly=true`）**：保持简洁版（项目基本信息 / 项目其他情况 分组只读 + 文件管理 + 关闭按钮）
+
+4. **新建模式（无 instanceId）**：保持原模板字段渲染 + 审批人 + 提交
+
+5. **保存时**：若管理员改了中标状态，调 `api.put('/projects/{id}', { win_bid_status: winBidDraft })` 持久化
+
+#### [frontend/src/pages/Projects.jsx](file:///y:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/Projects.jsx)
+
+- **自营项目编辑/查看分流**：判断 `p.source === 'self' && p.form_instance_id` → 走 `DynamicForm`（保留模板字段）+ `readOnly` 决定编辑/查看
+- **打开一种弹窗时清空另一种**：避免编辑/查看同时残留导致 UI 混乱
+
+### 验证
+
+| 项目 | 编辑 | 查看 | 文件列表 |
+|---|---|---|---|
+| 渠道1（id=28, zone=5） | ✅ 蓝色卡 + 中标状态「是」 + 文件列表1项（询价2026.xlsx） | ✅ 完整字段分组只读 | ✅ 1 个 |
+| 自营测试1（id=27, zone=6） | ✅ 蓝色卡 + 中标状态下拉 + 文件列表1项（2026年6月考试.xlsx） | ✅ 完整字段分组只读 | ✅ 1 个 |
+
+### 关键文件
+
+- 后端：[backend/app/routers/forms.py](file:///y:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/forms.py)
+- 前端：[frontend/src/components/DynamicForm.jsx](file:///y:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/DynamicForm.jsx)
+- 前端路由：[frontend/src/pages/Projects.jsx](file:///y:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/Projects.jsx)
+
+### 教训（本轮）
+
+1. **后端修 helper 后必须替换调用点**——之前加了 `_resolve_config_for_instance` 但 `list_form_files` / `delete_form_file` 还在用 `_ensure_config(db)`，等于没修
+2. **Python NameError 隐藏很深**——`update_instance` 函数体内用到 `Project / ProjectType` 但顶层 `from app.models import` 没包含；Python 直到运行到那一行才报 `NameError`，表面看是「编辑保存失败」
+3. **后端 CWD 必须绝对**——`config.yaml` 里 `database.url` 是相对路径，uvicorn 启动时 CWD 一变就连接到错的 db（空 db），前端所有接口返回空。改成绝对路径后稳定
+4. **比对两侧代码是定位问题最快方式**——本轮通过直接调两个 list-files 接口（自营 vs 渠道）一眼看出差异：自营返 0，渠道返 1，立刻定位到 `_ensure_config` 没被替换
+
+---
+
+## 23. boot.bat 一键启动脚本（2026-08-27）
+
+### 背景
+
+项目需要后端 (FastAPI) + 前端 (Vite build) 一起跑。之前每次启动都是手动：
+- 后端用 `start_server.py`（硬编码 `.venv_local` 路径，机器上不存在）
+- 前端用 `node node_modules/vite/bin/vite.js build` 手动 build
+
+**用户的最新反馈：双击 bat 文件，程序闪一下就关了，无法打开**
+
+### 排查过程
+
+| 问题 | 根因 |
+|---|---|
+| 闪退 | bat 文件里调用 `backend\.venv_local\Scripts\python.exe`，路径不存在 |
+| `hermes-agent\venv` python 启动失败 | `distutils-precedence.pth` import `_distutils_hack`，Python 3.12+ 已移除 distutils |
+| `site_pkg\pydantic_core` 报 `No module named '_pydantic_core'` | `pydantic_core` 是 Rust 编译的 C 扩展，必须用对应 Python 版本；`site_pkg` 里是为 Python 3.12 编译的，而 PATH 里的 `python` 是 `hermes-agent` 的 Python 3.11 |
+| 后端起来但 sqlalchemy 找不到 | `site_pkg` 在 PYTHONPATH 里的优先级低，hermes-agent venv 的 site-packages 抢先 import |
+
+### 最终解决方案
+
+#### [boot.bat](file:///y:/soft-RED/hermes/开发软件/渠道项目登记/boot.bat)
+
+1. **Python 解析顺序**（必须在 boot.bat 头部固定）：
+   1. `backend\.venv_local\Scripts\python.exe`（项目 venv）
+   2. **uv 全局 Python 3.12**：`%USERPROFILE%\AppData\Roaming\uv\python\cpython-3.12.13-windows-x86_64-none\python.exe`
+   3. `py -3.12` 启动器
+   4. `C:\Python312\python.exe`
+   5. PATH 里任何 >=3.12 的 python
+   
+   **关键：绝对不能用 hermes-agent venv 的 Python 3.11，会立即报 pydantic_core 错误**
+
+2. **5 步骤流程**：
+   - 解析 Python（上面顺序）
+   - 检测 Node.js
+   - 检查 `backend/site_pkg/fastapi` 是否存在，否则 pip install
+   - Build 前端到 `backend/static/`
+   - 启动 `_boot_wrapper.py`
+
+3. **全部 ASCII** 编码，避免 Windows PowerShell 中文乱码问题
+
+#### [backend/_boot_wrapper.py](file:///y:/soft-RED/hermes/开发软件/渠道项目登记/backend/_boot_wrapper.py)
+
+```python
+"""wrapper: inject backend/site_pkg into sys.path, then run uvicorn"""
+import sys, os
+ROOT = os.path.dirname(os.path.abspath(__file__))
+SITE_PKG = os.path.join(ROOT, 'site_pkg')
+
+# ★ 把 site_pkg 放 sys.path 第一位，强制用它（避免 hermes-agent venv 抢先）
+if SITE_PKG not in sys.path:
+    sys.path.insert(0, SITE_PKG)
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+import uvicorn
+uvicorn.run('app.main:app', host='0.0.0.0', port=8765)
+```
+
+**关键设计：**
+- `sys.path.insert(0, SITE_PKG)` — 确保 `site_pkg` 优先级高于 hermes-agent venv
+- 程序化 `uvicorn.run()` 而非命令行参数 — 避免 PATH 里有多个 uvicorn 时选错
+- 不修改 CWD — wrapper 内部不需要切到 backend（CWD 由 boot.bat 控制）
+
+### 验证
+
+```
+[1/5] Resolving Python 3.12 interpreter ...
+  OK Using uv Python: C:\Users\admin\AppData\Roaming\uv\python\cpython-3.12.13-...
+[2/5] Checking Node.js ...
+  OK Node.js v22.x detected
+[3/5] Checking backend dependencies ...
+  OK backend\site_pkg found, _boot_wrapper.py will use it
+[4/5] Building frontend ...
+  OK Frontend built
+[5/5] Launching backend on port 8765 ...
+
+  INFO:     Uvicorn running on http://0.0.0.0:8765 (Press CTRL+C to quit)
+
+  GET /api/health → 200 {"status":"ok"}
+```
+
+### 教训（本轮）
+
+1. **必须固定 Python 大版本** —— 这个项目的 `site_pkg` 是为 Python 3.12 预编译的，不能用 Python 3.11。boot.bat 必须硬编码几个 Python 3.12 候选路径，不能依赖 PATH 里的 `python`（可能是任意版本）
+2. **`pydantic_core` 是硬约束** —— Rust 编译的 C 扩展有强 ABI 绑定，跨 Python 版本必然失败。预编译的 `site_pkg` 必须配对应版本的 Python
+3. **PATH 里的 `python` 不可信** —— `where python` 返回两个结果：uv 全局和 Microsoft Store stub。启动脚本必须显式选 Python 3.12 路径
+4. **闪退排查要看 bat 第一行后哪里停** —— 我的第一批 boot.bat 在第 4 行 `call pip install` 调用了不存在的 python.exe，闪退；现在的版本在每个失败点都 `pause`，方便看到错误
+5. **双击 bat 不能假设 PATH 完整** —— bat 启动时是干净 PATH（只有 `C:\Windows\System32`），没有当前目录的自动加载。脚本里所有命令必须用绝对路径
+
+### 关键文件
+
+- 启动脚本：[boot.bat](file:///y:/soft-RED/hermes\开发软件/渠道项目登记/boot.bat)
+- Python wrapper：[backend/_boot_wrapper.py](file:///y:/soft-RED/hermes\开发软件/渠道项目登记/backend/_boot_wrapper.py)
+
+---
+
+## 24. 项目表单查看模式修复 + DynamicForm 自营弹窗（2026-08-27，端点 0 works / 1 no）
+
+### 背景
+
+用户反馈两个串联问题：
+1. **渠道项目查看模式**还能改中标状态、还能上传文件，违反"查看模式只读"原则
+2. **自营项目编辑/查看/新建按钮**全部无反应（点击无 alert、无弹窗）
+3. **新建按钮**（渠道/自营）也无反应
+
+### 根因（按发现顺序）
+
+#### 1. SQLite `database.url` 错配
+`config.yaml` 里 `database.url: sqlite:///Y:/soft-RED/.../data.db`，但本机只有 `Z:/`，uvicorn 启动后 `sqlalchemy.exc.OperationalError: unable to open database file`
+**修复**：改成 `sqlite:///Z:/soft-RED/hermes/开发软件/渠道项目登记/backend/data.db`
+
+#### 2. Python `ZoneInfoNotFoundError`
+uv 安装的 Python 3.11.15 不带 OS 时区数据库，调用 `ZoneInfo('Asia/Shanghai')` 时抛 `ZoneInfoNotFoundError`，导致渠道项目中标状态修改时第一次保存就报错
+**修复**：[backend/app/routers/projects.py:16-22](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/projects.py#L16-L22)
+
+```python
+try:
+    from zoneinfo import ZoneInfo
+    _SH_TZ = ZoneInfo('Asia/Shanghai')
+except Exception:
+    from datetime import timezone, timedelta
+    _SH_TZ = timezone(timedelta(hours=8))  # 兜底：用固定 +08:00 偏移
+```
+
+#### 3. 查看模式还能改/还能上传（渠道项目）
+前端 [ProjectForm.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/ProjectForm.jsx) 中：
+- 顶部蓝色"项目信息卡"原本 `{isEdit && (...)}`——查看模式确实不显示
+- 但中标状态行、文件上传 dropZone、文件列表的删除按钮都没根据 `readOnly` 屏蔽
+**修复**：新增 `readOnly` 入参 `renderFileList` / `renderDropZone` 等，`{!readOnly && (...)}` 包裹
+
+#### 4. 自营项目所有按钮无反应（核心 bug）
+ESBuild minify 后弹 `Uncaught ReferenceError: readOnly is not defined`：
+- [DynamicForm.jsx:22](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/DynamicForm.jsx#L22) 函数签名 `({ template, onClose, onSubmitted, instanceId, onInstanceSaved })` **没有 destructure `readOnly`**，但函数体里**多处**引用了 `readOnly`（包括 `<input readOnly />` 这个裸 JSX 属性）
+- ESBuild 把 `<input readOnly />` 编译成对变量 `readOnly` 的引用，函数体未声明 → `ReferenceError` → 整个 DynamicForm 组件挂载失败 → React 卸载弹窗 → 视觉上"无反应"
+**修复**：函数签名加 `readOnly = false` 参数；`<input readOnly />` 改 `<input readOnly={true} />`
+
+#### 5. 新建按钮也无反应
+[Projects.jsx:88](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/Projects.jsx#L88) `loadFormTemplateByName` 中：
+```js
+const tpl = res.data.find(t => t.name.includes(keyword))   // 旧代码：res 是数组，res.data 是 undefined
+```
+后端 `GET /api/forms/templates` 直接返回 `List[FormTemplateResponse]`，**不是** `{data: [...]}`，`res.data.find` 抛 `TypeError`
+**修复**：
+```js
+const list = Array.isArray(res) ? res : (res?.data || [])
+const tpl = list.find(t => (t.name || '').includes(keyword))
+```
+
+### 端点（Endpoint）标记
+
+| 端点 ID | commit | 状态 | 说明 |
+|---|---|---|---|
+| **0 works** | `8136cc6`（HEAD） | ✅ 当前可用 | 项目表单查看模式只读 + 自营/渠道 DynamicForm 修复 + ZoneInfo fallback + SQLite 路径修正 |
+| **1 no** | `8136cc6^` | ❌ 已知损坏 | 渠道项目查看模式仍可改/上传、自营项目弹窗空白 |
+
+### 回滚命令
+
+```bash
+# 完整回滚（强烈不推荐，会丢本轮所有修复）：
+git reset --hard 8136cc6^
+
+# 只回滚前端（推荐：保留后端 ZoneInfo/SQLite 修复）：
+git checkout 8136cc6^ -- frontend/
+npm --prefix frontend run build
+
+# 只回滚单个文件，例如 Projects.jsx：
+git checkout 8136cc6^ -- frontend/src/pages/Projects.jsx
+npm --prefix frontend run build
+
+# 回滚后端（如果数据库路径有问题可以先恢复旧 config 再修）：
+git checkout 8136cc6^ -- backend/app/routers/projects.py
+# 注意：backend/config.yaml 不在 git 里，需手动核对
+```
+
+### 本轮改动文件清单
+
+| 文件 | 改动 |
+|---|---|
+| `backend/config.yaml` | `database.url` 改绝对路径 `Z:/.../data.db` |
+| `backend/app/routers/projects.py` | ZoneInfo fallback 到 +08:00 偏移 |
+| `frontend/src/components/ProjectForm.jsx` | `renderFileList / renderDropZone` 加 `readOnly` 入参；中标状态行只编辑模式渲染；新增 `onFilesUploaded` prop（仅刷数据，不关弹窗） |
+| `frontend/src/components/DynamicForm.jsx` | 函数签名加 `readOnly = false`；`<input readOnly />` 改 `readOnly={true}`；补顶部蓝色项目信息卡 + 中标状态下拉 + useEffect loadInstance |
+| `frontend/src/pages/Projects.jsx` | `loadFormTemplateByName` 兼容 `Array.isArray(res)`；`handleSelfFormNew / handleChannelFormNew` 加 try/catch alert；编辑/查看模式 onSaved 加 `fetchDiagnose` |
+
+### 教训（本轮）
+
+1. **Minify 会暴露隐藏 bug** —— `<input readOnly />` 这种裸 JSX 属性在 dev 模式没事（React 直接当 prop 处理），但 ESBuild minify 后会被当成变量引用，函数体内必须先 destructure 出来
+2. **API 响应形状要早期校验** —— `res.data.find(...)` 这种假设响应是 `{data: [...]}` 的写法很容易中招，统一用 `Array.isArray()` + `??` 兜底
+3. **前端 minify 后报错只有行号，没有上下文** —— 加调试条（黄色左下角）是定位 "渲染崩在哪个 props" 的最快方法
+4. **SQLite 相对路径在 uvicorn 下不稳定** —— 永远用绝对路径，包括 `database.url`
+5. **Python `ZoneInfo` 依赖系统 tzdata** —— 容器化 / uv 装的 Python 没有；fallback 到 `timezone(timedelta(hours=8))` 是最稳的写法
+
+---
+
+## 25. 自营/渠道项目查看模式统一用 DynamicForm，编辑模式统一用 ProjectForm（2026-08-27）
+
+### 背景
+
+用户要求：
+1. **自营项目**：查看时与新建自营项目表单格式一致（DynamicForm 模板字段），编辑时退回 ProjectForm（项目信息框+文件管理，与渠道项目编辑一致）
+2. **渠道项目**：查看时与新建渠道项目表单格式一致（DynamicForm 模板字段），编辑时保持 ProjectForm
+3. **数据同步**：编辑修改中标状态/上传文件后，查看能同步显示最新内容
+
+### 改动
+
+#### 1. 自营项目编辑 → 退回 ProjectForm（[Projects.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/Projects.jsx)）
+
+- 移除 `showSelfEditForm` 状态、`handleSelfFormEdit` 函数、DynamicForm 编辑弹窗
+- `handleEditProject` 不再区分来源，统一 `setEditData(p); setShowForm(true)` 走 ProjectForm
+- 用户期望：编辑时只能改中标状态和上传文件，不显示模板字段
+
+#### 2. 自营项目查看 → 填充 DynamicForm values（[DynamicForm.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/DynamicForm.jsx)）
+
+- 加载实例时，`v = r.data?.data || {}` 取到的表单值从未填充到 `values` 状态，导致所有字段空白
+- 修复：在 `loadInstance useEffect` 中添加 `setValues(v)`，将后端返回的表单字段值填入 `values` 状态
+- 修复后，查看时所有字段正确显示用户填写的内容
+
+#### 3. 查看模式顶部项目信息卡（[DynamicForm.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/DynamicForm.jsx)）
+
+- 编辑模式已有蓝色项目信息卡（`instanceId && !readOnly`），但查看模式（`readOnly`）不显示
+- 新增查看模式项目信息卡（`instanceId && readOnly`），展示：
+  - 项目名称、项目类型、预计金额、合作公司、联系人、联系方式
+  - 中标状态只读文本（绿色/红色/黄色标注）
+- 中标状态从 `GET /projects/{projectId}` 实时读取，与编辑修改保持同步
+
+#### 4. 渠道项目查看 → 走 DynamicForm（[Projects.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/Projects.jsx)）
+
+- 新增 `channelFormTemplate` 状态、`loadChannelFormTemplate()` 函数（按模板名"渠道项目"搜索）
+- 新增 `handleChannelFormView()` 和 `showChannelViewForm` 弹窗
+- `handleViewProject` 增加渠道项目分流：`p.source === 'channel' && p.form_instance_id` 时走 DynamicForm 只读查看
+- 渠道项目编辑不受影响，继续走 ProjectForm
+
+### 最终行为矩阵
+
+| 操作 | 自营项目 | 渠道项目 |
+|------|---------|---------|
+| 新建 | DynamicForm（模板字段） | ProjectForm（硬编码） |
+| 编辑 | ProjectForm（项目信息+文件管理） | ProjectForm（项目信息+文件管理） |
+| 查看 | DynamicForm（只读，模板字段+项目信息卡） | DynamicForm（只读，模板字段+项目信息卡） |
+
+### 本轮改动文件清单
+
+| 文件 | 改动 |
+|---|---|
+| `frontend/src/components/DynamicForm.jsx` | `loadInstance useEffect` 增加 `setValues(v)` 填充表单值；新增查看模式蓝色项目信息卡（含中标状态只读展示）；必填项红色 `*` 标记在只读模式也显示；项目信息卡标签根据模板名称动态切换 |
+| `frontend/src/pages/Projects.jsx` | 移除 `showSelfEditForm`/`handleSelfFormEdit`；新增 `channelFormTemplate`/`loadChannelFormTemplate`/`handleChannelFormView`/`showChannelViewForm`；`handleViewProject` 渠道项目分流；`handleEditProject` 统一走 ProjectForm |
+| `frontend/src/components/ProjectForm.jsx` | 增加 `isSelfProject` 判断，所有标签文字根据 `project.source` 动态切换 |
+
+---
+
+## 26. 自营/渠道项目标签文字对齐 + 左侧菜单顺序调整（2026-08-27）
+
+### 26.1 标签文字对齐
+**需求**：自营项目编辑表单中，"合作公司/联系人/联系方式/预计金额"标签需要和自营项目模板一致：
+
+| 字段 | 渠道项目 | 自营项目 |
+|------|---------|---------|
+| 金额 | 预计金额 | 预计落单金额 |
+| 客户 | 公司名称 | 客户单位名称 |
+| 联系人 | 联系人 | 业主方联系人 |
+| 联系方式 | 联系方式 | 业主方联系方式 |
+
+**实现**：
+- [DynamicForm.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/DynamicForm.jsx)：根据模板名称 `template.name.includes('自营')` 判断，动态切换 fallback key 和显示标签
+- [ProjectForm.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/ProjectForm.jsx)：根据 `project.source === 'self'` 判断，所有蓝色信息卡、只读标签、编辑输入框标签全部动态切换
+
+### 26.2 左侧菜单顺序调整
+**需求**：存储区域和用户管理下移到**通知管理**上面，其他顺序不变。
+
+**原顺序**：项目列表 → 审批管理 → 项目跟单 → AI报表 → 存储区域 → 用户管理 → 表单管理 → 审计记录 → 通知管理 → 通知中心
+
+**新顺序**：项目列表 → 审批管理 → 项目跟单 → AI报表 → 表单管理 → 审计记录 → 通知管理 → **存储区域 → 用户管理** → 通知中心
+
+**改动**：[Layout.jsx:104-120](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/Layout.jsx#L104-L120) 调整菜单位置
+
+### 本轮改动文件清单
+
+| 文件 | 改动 |
+|---|---|
+| `frontend/src/components/DynamicForm.jsx` | 项目信息卡标签、fallback key 动态匹配模板名称 |
+| `frontend/src/components/ProjectForm.jsx` | 蓝色信息卡标签、只读字段标签、编辑输入框标签全部动态匹配项目来源 |
+| `frontend/src/components/Layout.jsx` | 调整左侧菜单栏顺序 |
+
+---
+
+## 28. 普通账号「查看」入口对齐 admin/important/archive（2026-08-27）
+
+### 背景
+
+之前普通账号（`role=normal`）在 [Projects.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/Projects.jsx) 列表中点击「查看」按钮时，调用的是 `setShowViewForm(true)` 直接弹 [ProjectForm](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/ProjectForm.jsx) 的渠道项目只读视图；而 admin/important/archive 走的是 `handleViewProject(p)` 按 `source` 分发到 DynamicForm（自营）或 DynamicForm（渠道）。
+
+导致同一个项目：
+- admin 看到 → DynamicForm 自营模板
+- 普通账号看到 → ProjectForm 渠道硬编码字段
+
+两者内容不一致，违反「同一项目查看内容统一」原则。
+
+### 改动
+
+[Projects.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/Projects.jsx#L361)：
+
+普通账号操作列改为：
+```js
+const buttons = [
+  <button key="edit" onClick={() => { setEditData(p); setShowForm(true) }} className="text-blue-600 hover:underline">编辑</button>,
+  <button key="view" onClick={() => handleViewProject(p)} className="text-gray-600 hover:underline">查看</button>,
+]
+```
+
+- 「编辑」 → 走 `setShowForm(true)` 打开 ProjectForm 编辑（与 admin 一致）
+- 「查看」 → 走 `handleViewProject(p)`，按 `p.source` 路由：
+  - `source='self' && form_instance_id` → `handleSelfFormView` → DynamicForm 自营模板只读
+  - `source='channel' && form_instance_id` → `handleChannelFormView` → DynamicForm 渠道模板只读
+  - 其他 → ProjectForm 只读视图
+
+### 效果
+
+| 角色 | 渠道项目查看 | 自营项目查看 |
+|---|---|---|
+| admin / important / archive | DynamicForm（渠道模板） | DynamicForm（自营模板） |
+| 普通账号 | DynamicForm（渠道模板） ✅ 现在一致 | DynamicForm（自营模板） ✅ 现在一致 |
+
+---
+
+## 29. 渠道项目「新建」按钮改为走 DynamicForm + 独立 showChannelForm 弹窗（2026-08-27）
+
+### 背景
+
+用户在「表单管理 → 渠道项目登记表」中改了分区名/字段 label 并保存后：
+
+- ✅ **查看**渠道项目：立即看到新模板（`handleChannelFormView` 每次 `loadChannelFormTemplate()`）
+- ❌ **新建**渠道项目：依旧显示老模板（硬编码「项目基本情况」分区 + 「选填」textarea）
+
+### 根因排查（按发现顺序）
+
+#### 1. 「渠道项目新建」按钮 onClick 直接打开 ProjectForm
+
+[Projects.jsx:191-196](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/Projects.jsx#L191-L196)：
+
+```js
+<button onClick={() => { setEditData(null); setShowForm(true) }}>
+  渠道项目新建
+</button>
+```
+
+→ 走 `ProjectForm`（[frontend/src/components/ProjectForm.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/ProjectForm.jsx)）硬编码字段，**完全没读 form_templates 表**。
+
+对比自营项目「新建」按钮 onClick 是 `handleSelfFormNew` → `loadSelfFormTemplate()` → DynamicForm（每次拉最新模板）。两者路径根本不对称。
+
+#### 2. 第一轮修复后弹窗仍不显示
+
+我先加 `handleChannelFormNew` 并复用 `setShowChannelViewForm(true)`，结果渠道项目查看弹窗条件是：
+
+```js
+{showChannelViewForm && channelFormTemplate && editData && (...)}
+```
+
+新建时 `editData=null`，**弹窗不渲染**。用户看到的「项目基本情况」分区其实是**浏览器旧 bundle 跑的 ProjectForm**（没重新 build）。
+
+#### 3. 最终方案：新增独立 `showChannelForm` state + 独立弹窗
+
+[Projects.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/Projects.jsx)：
+
+1. 新增 state：
+   ```js
+   const [showChannelForm, setShowChannelForm] = useState(false)  // 渠道项目新建弹窗
+   ```
+
+2. `handleChannelFormNew` 触发 `setShowChannelForm(true)`（不再复用 `showChannelViewForm`）：
+   ```js
+   const handleChannelFormNew = async () => {
+     const tpl = await loadChannelFormTemplate()
+     if (tpl) {
+       setEditData(null)
+       setShowChannelForm(true)
+     }
+   }
+   ```
+
+3. 新增独立弹窗渲染块（与自营项目新建对称，不传 instanceId、不传 readOnly、不要求 editData）：
+   ```jsx
+   {showChannelForm && channelFormTemplate && (
+     <div className="fixed inset-0 bg-black/50 ... z-50 p-4">
+       <div className="bg-white rounded-lg shadow-2xl max-h-[92vh] overflow-auto w-[1100px] max-w-[95vw] p-6">
+         <DynamicForm
+           template={channelFormTemplate}
+           onClose={() => setShowChannelForm(false)}
+           onSubmitted={() => { setShowChannelForm(false); fetchProjects() }}
+         />
+       </div>
+     </div>
+   )}
+   ```
+
+4. 「渠道项目新建」按钮 onClick 改为 `handleChannelFormNew`。
+
+### 最终对称矩阵
+
+| 操作 | 自营项目 | 渠道项目 |
+|---|---|---|
+| 新建 | DynamicForm（**最新模板**） | DynamicForm（**最新模板**） ✅ 修复后 |
+| 编辑 | ProjectForm | ProjectForm |
+| 查看 | DynamicForm 只读 | DynamicForm 只读 |
+
+### 教训（本轮）
+
+1. **「复用查看 state 做新建」是常见错误** —— 查看弹窗条件 `editData` 必填，新建时 `editData=null` 直接不渲染，必须用独立 state
+2. **前端代码修改 ≠ 用户立即生效** —— 必须 `npm --prefix frontend run build` 后浏览器刷新，旧 bundle 仍跑 ProjectForm 硬编码字段
+3. **API 调用失败要看 alert** —— `loadChannelFormTemplate` 内部 try/catch 必须打到 `alert()`，否则用户不知道后端报错
+
+### 关键文件
+
+- [frontend/src/pages/Projects.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/Projects.jsx)
+
+### 27.1 AI 字符宽度对齐
+
+**问题**：左栏菜单里 `📊 AI报表` 的 "AI" 两个英文字符比同行的"项目/管理"等汉字窄，造成上下菜单基线不对齐。
+
+**解决**（[Layout.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/Layout.jsx)）：把 "AI" 拆成两个子 span，每个子 span 独立设置 1em 宽 + text-align:center，让 A 居中显示在第 1 个汉字位置、I 居中显示在第 2 个汉字位置：
+
+```jsx
+const aiStyle = { display: 'inline-flex', fontFamily: '"PingFang SC","Microsoft YaHei","微软雅黑",sans-serif' }
+
+<Link to="/reports" ...>
+  📊 <span style={aiStyle}>
+    <span style={{ width: '1em', textAlign: 'center', display: 'inline-block' }}>A</span>
+    <span style={{ width: '1em', textAlign: 'center', display: 'inline-block' }}>I</span>
+  </span>报表
+</Link>
+```
+
+**关键点**：
+- 用 `display: inline-block` 让子 span 的 `width: 1em` 生效
+- `text-align: center` 把字符居中在自己的 1em 单元内
+- 强制中文字体，避免英文 fallback 字符宽差异
+- 不要在 JSX 文本节点里写 `\u2009`（窄空格），它会被当字面量，不解析 Unicode 转义；要空格就用 `{'\u2009'}` 或直接换结构
+
+### 27.2 表单管理列表去掉「系统内置」徽章
+
+**需求**：用户反馈「表单管理」列表里"系统内置"小蓝徽章多余，要求去掉，让三个模板（渠道项目登记表 / 自营项目登记表 / 项目跟单登记表）格式一致。
+
+**改动**（[FormTemplates.jsx:154-156](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/FormTemplates.jsx#L154-L156)）：
+
+| 之前 | 之后 |
+|---|---|
+| `<tr className={... ${isBuiltin ? 'bg-blue-50/40' : ''}}>` | `<tr className="border-b hover:bg-gray-50">` |
+| `<td className="font-medium flex items-center gap-2 whitespace-nowrap">` + 内嵌 `<span>系统内置</span>` | `<td className="font-medium whitespace-nowrap min-w-[10rem]">` + 直接渲染 `t.name` |
+
+**保留**：
+- `isBuiltin` 变量仍存在，alert「是系统内置表单模板，不能删除/停用」的告警逻辑保持不变——内置模板仍只受代码维护，UI 上不允许误操作。
+- 行内 `<span>{t.name}</span>` 视觉上跟其它无徽章的模板一致。
+
+### 本轮改动文件清单
+
+| 文件 | 改动 |
+|---|---|
+| `frontend/src/components/Layout.jsx` | 新增 `aiStyle` 常量；"AI报表"菜单项把 "AI" 拆成两个 1em 居中子 span |
+| `frontend/src/pages/FormTemplates.jsx` | 去掉"系统内置"蓝徽章；移除内置模板的 `bg-blue-50/40` 行背景色；td 简化为直接渲染 `t.name` 加 `min-w-[10rem]` 防折行 |
+
+---
+
+## 30. AI报表「模型配置」仅系统管理员可用（2026-08-27）
+
+### 需求
+
+AI报表中的「模型配置」功能（模型 CRUD + 连接测试）只能系统管理员使用；
+其他角色（important / normal / archive / archive）进入 AI 报表时**看不到**「模型配置」页签，也无法调用模型配置接口。
+
+### 后端现状（已满足，无需改动）
+
+[forms.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/forms.py) 中所有模型配置**写/测接口**均已使用 `require_admin`：
+
+| 接口 | 鉴权 |
+|---|---|
+| `POST /api/forms/ai-models` | `require_admin` |
+| `PUT /api/forms/ai-models/{id}` | `require_admin` |
+| `DELETE /api/forms/ai-models/{id}` | `require_admin` |
+| `POST /api/forms/ai-models/{id}/test` | `require_admin` |
+| `GET /api/forms/ai-model-presets` | `require_admin` |
+
+仅 `GET /api/forms/ai-models`（列表）为非 admin 保留：非 admin 自动只返回启用项（`is_enabled == True`），供「AI 分析」选择模型使用，不暴露密钥与未启用项。**刻意保留**，非 bug。
+
+### 前端改动（本轮唯一改动）
+
+[Reports.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/Reports.jsx) 顶栏「模型配置」页签按钮用 `user?.role === 'admin'` 包裹，非 admin 不渲染：
+
+```jsx
+{user?.role === 'admin' && (
+  <button onClick={() => setActiveTab('models')} ...>模型配置</button>
+)}
+```
+
+`user` 来自 `useAuthStore()`（[frontend/src/stores/auth.js](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/stores/auth.js)），角色字段即 `user.role`（`'admin'`），与后端 `UserRole`（[models.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/models.py)）一致。
+
+### 效果
+
+- 非 admin 用户进入 AI 报表 → 只见「标准报表」「AI 分析」两个页签，无「模型配置」入口
+- 即使绕过前端直接调写/测接口，也会被后端 `require_admin` 拦截返回 403（前后端双重保险）
+
+### 改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `frontend/src/pages/Reports.jsx` | 「模型配置」页签按钮包裹 `user?.role === 'admin'` 条件渲染 |
+| `backend/config.yaml` | （本次启动修复）数据库 URL 盘符 `Z:` → `Y:`，与仓库实际盘符对齐 |
+
+

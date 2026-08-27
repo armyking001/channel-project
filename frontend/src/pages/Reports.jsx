@@ -427,12 +427,14 @@ export default function Reports() {
             >
               AI 分析
             </button>
-            <button
-              onClick={() => setActiveTab('models')}
-              className={`px-4 py-2 rounded text-sm ${activeTab === 'models' ? 'bg-emerald-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
-            >
-              模型配置
-            </button>
+            {user?.role === 'admin' && (
+              <button
+                onClick={() => setActiveTab('models')}
+                className={`px-4 py-2 rounded text-sm ${activeTab === 'models' ? 'bg-emerald-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
+              >
+                模型配置
+              </button>
+            )}
           </div>
           <div className="text-xs text-gray-500">
             已启用模型 {enabledModelCount} 个，默认模型：{defaultModel?.name || '未配置'}

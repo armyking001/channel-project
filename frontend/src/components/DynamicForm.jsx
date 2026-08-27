@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import {
-  createFormInstance, initFormFolders, uploadFormFiles, listFormFiles,
-  deleteFormFile, getUsers, listStorageZones, default as api,
+  createFormInstance, updateFormInstance, initFormFolders, uploadFormFiles, listFormFiles,
+  deleteFormFile, getUsers, listStorageZones, getFormInstance, default as api,
 } from '../api'
 import { useAuthStore } from '../stores/auth'
 
@@ -18,8 +18,52 @@ const SECTION_TITLE = "text-sm font-bold text-green-700"
 const TENDER_FILE_KEYS = ['tender_file', 'zhao_biao', 'tender']
 const BID_FILE_KEYS = ['bid_file', 'tou_biao', 'bid']
 
-export default function DynamicForm({ template, onClose, onSubmitted, instanceId, onInstanceSaved }) {
+export default function DynamicForm({ template, onClose, onSubmitted, instanceId, projectId = null, onInstanceSaved, readOnly = false, isAdmin = false }) {
   const { user } = useAuthStore()
+  // emoji 用 String.fromCharCode 注入，避免源码字面量被工具截断
+  const EMOJI_BOOK = String.fromCharCode(0x1F4D6)
+  const EMOJI_SHIELD = String.fromCharCode(0x1F6E1) + String.fromCharCode(0xFE0F)
+  const EMOJI_LOCK = String.fromCharCode(0x1F512)
+
+  // ★ 编辑模式：项目信息卡 + 中标状态
+  const [projectInfo, setProjectInfo] = useState(null)
+  const [winBidDraft, setWinBidDraft] = useState("in_progress")
+
+  useEffect(() => {
+    if (!instanceId) return
+    ;(async () => {
+      try {
+        const r = await getFormInstance(instanceId)
+        const v = r.data?.data || {}
+        // 根据模板名选择正确的 fallback label
+        const isSelf = (template.name || '').includes('自营')
+        const info = {
+          project_name: v.project_name || v["项目名称"] || "-",
+          project_type: v.project_type || v["项目类型"] || "-",
+          expected_amount: v.expected_amount || v["预计金额"] || v["预计落单金额（万元）"] || "-",
+          partner_company: v.partner_company || v["公司名称"] || v["客户单位名称"] || "-",
+          contact_person: v.contact_person || v["联系人"] || v["业主方联系人"] || "-",
+          contact_info: v.contact_info || v["联系方式"] || v["业主方联系方式"] || "-"
+        }
+        setProjectInfo(info)
+        // 填充所有表单字段到 values 状态
+        setValues(v)
+        // 优先从 Project 表加载中标状态，其次从实例数据
+        if (projectId) {
+          try {
+            const projRes = await api.get(`/projects/${projectId}`)
+            setWinBidDraft(projRes.data?.win_bid_status || "in_progress")
+          } catch {
+            setWinBidDraft(v.win_bid_status || "in_progress")
+          }
+        } else {
+          setWinBidDraft(v.win_bid_status || "in_progress")
+        }
+      } catch (e) {
+        console.warn("[DynamicForm] loadInstance failed:", e)
+      }
+    })()
+  }, [instanceId, projectId])
   const [values, setValues] = useState({})
   const [errors, setErrors] = useState({})
   const [submitting, setSubmitting] = useState(false)
@@ -186,11 +230,10 @@ export default function DynamicForm({ template, onClose, onSubmitted, instanceId
 
   const handleSubmit = async (e) => {
     e.preventDefault()
+    if (readOnly) return
     if (!validate()) return
     setSubmitting(true)
     try {
-      // 后端会自动分配审批人和存储区域 + 创建 NAS 目录，前端无需再调 initFormFolders
-      // 但后端需要根据 label（中文）反查"责任销售"/"项目名称"字段，所以前端做约定字段映射
       const submitData = { ...values }
       // 约定：如果表单中有 label 为「责任销售」/「项目名称」/「合作单位」的字段，
       // 把它们的值也写到约定的英文 key，让后端 create_instance 能正确读取
@@ -202,25 +245,39 @@ export default function DynamicForm({ template, onClose, onSubmitted, instanceId
         if ((lbl === '合作单位' || lbl === '合作公司') && v) submitData.partner_company = v
         if (lbl === '项目类型' && v) submitData.project_type = v
       })
-      const instanceRes = await createFormInstance({ template_id: template.id, data: submitData })
-      const instanceId = instanceRes.data.id
+
+      let targetInstanceId = instanceId
+
+      if (targetInstanceId) {
+        // ★ 编辑模式：更新已有实例
+        await updateFormInstance(targetInstanceId, { data: submitData })
+
+        // 保存中标状态到 Project 表
+        if (projectId) {
+          await api.put(`/projects/${projectId}`, { win_bid_status: winBidDraft })
+        }
+      } else {
+        // ★ 新建模式：创建新实例
+        const instanceRes = await createFormInstance({ template_id: template.id, data: submitData })
+        targetInstanceId = instanceRes.data.id
+      }
 
       const tenderKey = fields.find(isTenderFile)?.key
       const bidKey = fields.find(isBidFile)?.key
 
       const uploadPromises = []
       if (tenderKey && selectedFiles[tenderKey]?.length) {
-        uploadPromises.push(uploadFormFiles(instanceId, 'tender', selectedFiles[tenderKey]))
+        uploadPromises.push(uploadFormFiles(targetInstanceId, 'tender', selectedFiles[tenderKey]))
       }
       if (bidKey && selectedFiles[bidKey]?.length) {
-        uploadPromises.push(uploadFormFiles(instanceId, 'bid', selectedFiles[bidKey]))
+        uploadPromises.push(uploadFormFiles(targetInstanceId, 'bid', selectedFiles[bidKey]))
       }
       if (uploadPromises.length > 0) {
         await Promise.all(uploadPromises)
       }
 
       alert('提交成功')
-      onInstanceSaved?.(instanceId)
+      onInstanceSaved?.(targetInstanceId)
       onSubmitted?.()
     } catch (err) {
       alert('提交失败: ' + (err.response?.data?.detail || err.message))
@@ -236,6 +293,23 @@ export default function DynamicForm({ template, onClose, onSubmitted, instanceId
     const names = fileNames[f.key] || []
     const isTender = isTenderFile(f)
     const existingList = isTender ? tenderFiles : bidFiles
+
+    // 只读模式：不显示上传区域，仅显示文件夹路径
+    if (readOnly) {
+      return (
+        <div className="border border-gray-200 rounded-lg px-4 py-4 bg-gray-50 min-h-[60px] flex flex-col justify-center">
+          {folderPreview && (
+            <div className="text-xs text-blue-600 truncate font-mono flex items-center justify-center">
+              <span className="mr-1">📁</span>
+              <span>{folderPreview}</span>
+            </div>
+          )}
+          {existingList.length === 0 && (
+            <div className="text-xs text-gray-400 text-center mt-1">只读模式，不可上传文件</div>
+          )}
+        </div>
+      )
+    }
 
     return (
       <div
@@ -310,7 +384,7 @@ export default function DynamicForm({ template, onClose, onSubmitted, instanceId
               <span className="truncate text-green-700">📄 {file.name}</span>
               <div className="flex items-center gap-1 ml-2 shrink-0">
                 <span className="text-[10px] text-gray-400">已上传</span>
-                {instanceId && (
+                {instanceId && !readOnly && (
                   <button type="button" onClick={() => deleteExistingFile(folderType, file.name)}
                     className="text-gray-400 hover:text-red-500">✕</button>
                 )}
@@ -320,11 +394,13 @@ export default function DynamicForm({ template, onClose, onSubmitted, instanceId
           {names.map((name, i) => (
             <div key={`new-${i}`} className="px-3 py-1.5 text-xs text-gray-700 border-b border-gray-100 last:border-0 flex items-center justify-between hover:bg-gray-50">
               <span className="truncate text-blue-700">📄 {name}</span>
-              <div className="flex items-center gap-1 ml-2 shrink-0">
-                <span className="text-[10px] text-blue-400">待上传</span>
-                <button type="button" onClick={() => removeFile(f.key, i)}
-                  className="text-gray-400 hover:text-red-500">✕</button>
-              </div>
+              {!readOnly && (
+                <div className="flex items-center gap-1 ml-2 shrink-0">
+                  <span className="text-[10px] text-blue-400">待上传</span>
+                  <button type="button" onClick={() => removeFile(f.key, i)}
+                    className="text-gray-400 hover:text-red-500">✕</button>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -343,6 +419,43 @@ export default function DynamicForm({ template, onClose, onSubmitted, instanceId
     const isSalesField = (f.label || '').trim() === '责任销售'
     if (isSalesField) {
       fieldPh = '如由销售本人建立，此处可不填'
+    }
+
+    // 只读模式：显示纯文本值
+    if (readOnly) {
+      let displayVal = val
+      if (val === undefined || val === null || val === '') {
+        displayVal = <span className="text-gray-300">（未填写）</span>
+      } else if (f.type === 'number') {
+        displayVal = f.unit ? `${val} ${f.unit}` : val
+      } else if (f.type === 'date' && val) {
+        displayVal = val
+      } else if (f.type === 'select' || f.type === 'radio') {
+        displayVal = val
+      } else if (f.type === 'checkbox') {
+        displayVal = (val || []).length > 0 ? (val || []).join('、') : <span className="text-gray-300">（未填写）</span>
+      }
+      if (f.type === 'file') {
+        return (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              {f.label}{f.required && !isSalesField && <Star />}
+            </label>
+            {renderDropZone(f)}
+            {renderFileList(f)}
+          </div>
+        )
+      }
+      return (
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            {f.label}{f.required && !isSalesField && <Star />}
+          </label>
+          <div className="w-full border border-gray-200 rounded-md px-3 py-2 bg-gray-50 text-gray-700 text-sm min-h-[38px]">
+            {displayVal}
+          </div>
+        </div>
+      )
     }
 
     if (f.type === 'file') {
@@ -507,25 +620,99 @@ export default function DynamicForm({ template, onClose, onSubmitted, instanceId
     )
   }
 
+  const sn = (template.name || '')
+  const isSelf = sn.includes('自营')
+  const lblAmount = isSelf ? '预计落单金额' : '预计金额'
+  const lblCompany = isSelf ? '客户单位名称' : '公司名称'
+  const lblContact = isSelf ? '业主方联系人' : '联系人'
+  const lblPhone = isSelf ? '业主方联系方式' : '联系方式'
+
   return (
     <div className="w-full bg-white">
-      {/* 顶部标题栏 — 与 ProjectForm 严格一致：仅标题 + 关闭按钮 */}
+      {/* 顶部标题栏 — 与 ProjectForm 严格一致：标题 + 状态徽章 + 关闭按钮 */}
       <div className="flex items-center justify-between pb-4 mb-4 border-b">
         <h3 className="text-xl font-bold text-gray-800">
-          {/* 内置模板按用途显示为「新建项目」 */}
-          {template.name === '渠道项目登记表' || template.name === '自建项目登记表' || template.name === '自营项目登记表' ? '新建项目' : template.name}
+          {(template.name === '渠道项目登记表' || template.name === '自建项目登记表' || template.name === '自营项目登记表') ? (instanceId ? (readOnly ? '查看项目详情' : (isAdmin ? '编辑项目（管理员模式）' : '编辑项目（仅上传文件）')) : '新建项目') : template.name}
           <span className="ml-2 text-[10px] font-normal text-gray-400">v2.1</span>
         </h3>
+        {(instanceId || readOnly) && (
+          <span className="text-xs px-2 py-1 rounded border"
+            style={{
+              color: readOnly ? '#6b7280' : (isAdmin ? '#059669' : '#d97706'),
+              background: readOnly ? '#f3f4f6' : (isAdmin ? '#ecfdf5' : '#fffbeb'),
+              borderColor: readOnly ? '#d1d5db' : (isAdmin ? '#a7f3d0' : '#fde68a')
+            }}>
+            {readOnly ? EMOJI_BOOK+' 只读查看模式' : (isAdmin ? EMOJI_SHIELD+' 管理员权限：可修改中标状态及上传文件' : EMOJI_LOCK+' 项目已建，字段锁定，仅可上传/查看文件')}
+          </span>
+        )}
         <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">×</button>
       </div>
 
       <form onSubmit={handleSubmit}>
+
+        {/* 编辑模式：顶部蓝色「项目信息」只读区 + 中标状态行（与渠道 ProjectForm 一致） */}
+        {instanceId && !readOnly && (
+          <div className="mb-5 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+            <div className="text-sm font-bold text-blue-800 mb-3 flex items-center gap-2">
+              <span>【项目信息】</span>
+              <span className="text-xs text-green-600 bg-green-100 px-2 py-0.5 rounded-full">管理员可修改中标状态</span>
+            </div>
+            <div className="grid grid-cols-3 gap-x-8 gap-y-2 text-sm">
+              <div><span className="text-gray-500">项目名称：</span><span className="text-gray-800">{projectInfo?.project_name || "-"}</span></div>
+              <div><span className="text-gray-500">项目类型：</span><span className="text-gray-800">{projectInfo?.project_type || "-"}</span></div>
+              <div><span className="text-gray-500">{lblAmount}：</span><span className="text-gray-800">{projectInfo?.expected_amount || "-"} 万元</span></div>
+              <div><span className="text-gray-500">{lblCompany}：</span><span className="text-gray-800">{projectInfo?.partner_company || "-"}</span></div>
+              <div><span className="text-gray-500">{lblContact}：</span><span className="text-gray-800">{projectInfo?.contact_person || "-"}</span></div>
+              <div><span className="text-gray-500">{lblPhone}：</span><span className="text-gray-800">{projectInfo?.contact_info || "-"}</span></div>
+            </div>
+            <div className="mt-3 pt-3 border-t border-blue-200">
+              <div className="flex items-center gap-3 flex-wrap">
+                <label className="text-sm font-medium text-gray-700">中标状态（可修改）：</label>
+                <select
+                  value={winBidDraft || "in_progress"}
+                  onChange={e => setWinBidDraft(e.target.value)}
+                  className="border border-gray-300 rounded-md px-3 py-1.5 text-sm bg-white"
+                >
+                  <option value="in_progress">进行中</option>
+                  <option value="yes">中标</option>
+                  <option value="no">未中标</option>
+                </select>
+                <span className="text-xs text-gray-500">首次修改后保存生效，后续修改需填写理由并验证密码</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 查看模式：顶部蓝色「项目信息」只读区 + 中标状态（只读） */}
+        {instanceId && readOnly && (
+          <div className="mb-5 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+            <div className="text-sm font-bold text-blue-800 mb-3">【项目信息】</div>
+            <div className="grid grid-cols-3 gap-x-8 gap-y-2 text-sm">
+              <div><span className="text-gray-500">项目名称：</span><span className="text-gray-800">{projectInfo?.project_name || "-"}</span></div>
+              <div><span className="text-gray-500">项目类型：</span><span className="text-gray-800">{projectInfo?.project_type || "-"}</span></div>
+              <div><span className="text-gray-500">{lblAmount}：</span><span className="text-gray-800">{projectInfo?.expected_amount || "-"} 万元</span></div>
+              <div><span className="text-gray-500">{lblCompany}：</span><span className="text-gray-800">{projectInfo?.partner_company || "-"}</span></div>
+              <div><span className="text-gray-500">{lblContact}：</span><span className="text-gray-800">{projectInfo?.contact_person || "-"}</span></div>
+              <div><span className="text-gray-500">{lblPhone}：</span><span className="text-gray-800">{projectInfo?.contact_info || "-"}</span></div>
+            </div>
+            <div className="mt-3 pt-3 border-t border-blue-200">
+              <div className="flex items-center gap-3 flex-wrap">
+                <span className="text-sm font-medium text-gray-700">中标状态：</span>
+                <span className={`text-sm font-semibold ${winBidDraft === 'yes' ? 'text-green-600' : winBidDraft === 'no' ? 'text-red-500' : 'text-yellow-600'}`}>
+                  {winBidDraft === 'yes' ? '中标' : winBidDraft === 'no' ? '未中标' : '进行中'}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
         {sections.map(renderSection)}
 
         {fields.length === 0 && (
           <div className="text-center text-gray-400 py-8">该表单没有字段</div>
         )}
 
+        {!readOnly && (
         <div className="mb-5">
           <div className="bg-green-50 border-l-4 border-green-500 px-3 py-1.5 mb-3">
             <span className="text-sm font-bold text-green-700">审批人</span>
@@ -538,16 +725,19 @@ export default function DynamicForm({ template, onClose, onSubmitted, instanceId
             className="w-full border border-gray-200 rounded-md px-3 py-2 bg-gray-50 text-gray-700"
           />
         </div>
+        )}
 
         <div className="flex justify-end gap-3 pt-5 border-t mt-6">
           <button type="button" onClick={onClose}
             className="px-6 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50 transition">
-            取消
+            {readOnly ? "关闭" : "取消"}
           </button>
+          {!readOnly && (
           <button type="submit" disabled={submitting}
             className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 transition shadow-sm">
             {submitting ? '提交中...' : '提交'}
           </button>
+          )}
         </div>
       </form>
     </div>

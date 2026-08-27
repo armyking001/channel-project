@@ -134,7 +134,7 @@ export default function FormTemplates() {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 border-b">
               <tr>
-                <th className="px-4 py-3 text-left text-gray-600 font-medium">表单名称</th>
+                <th className="px-4 py-3 text-left text-gray-600 font-medium whitespace-nowrap min-w-[10rem]">表单名称</th>
                 <th className="px-4 py-3 text-left text-gray-600 font-medium">描述</th>
                 <th className="px-4 py-3 text-center text-gray-600 font-medium">字段数</th>
                 <th className="px-4 py-3 text-center text-gray-600 font-medium">状态</th>
@@ -151,13 +151,8 @@ export default function FormTemplates() {
               ) : templates.map(t => {
                 const isBuiltin = BUILTIN_TEMPLATE_NAMES.includes(t.name)
                 return (
-                  <tr key={t.id} className={`border-b hover:bg-gray-50 ${isBuiltin ? 'bg-blue-50/40' : ''}`}>
-                    <td className="px-4 py-3 font-medium flex items-center gap-2">
-                      {isBuiltin && (
-                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-700 border-white border" title="由代码自动维护，确保与项目列表表单完全一致">
-                          系统内置
-                        </span>
-                      )}
+                  <tr key={t.id} className="border-b hover:bg-gray-50">
+                    <td className="px-4 py-3 font-medium whitespace-nowrap min-w-[10rem]">
                       <span>{t.name}</span>
                     </td>
                     <td className="px-4 py-3 text-gray-500">{t.description || '-'}</td>

@@ -18,21 +18,17 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     const status = error.response?.status
-    // 401: token 无效/过期；403 + 路径包含 admin 操作：登录态与权限不匹配，强制重登
     const isAdminPath = (error.config?.url || '').match(
       /\/(storage-zones|forms\/templates|users|admin)/
     )
     if (status === 401 || (status === 403 && isAdminPath)) {
-      // 避免死循环：登出页本身 / 登录页本身不要触发
       const path = window.location.pathname
       const onLoginPage = path === '/login' || path.startsWith('/login')
       const currentToken = localStorage.getItem('token')
-      // 只有当前确实带 token 才清掉（防止登出请求后误清）
       if (currentToken && !onLoginPage) {
         console.warn(`[auth] ${status} on ${error.config?.url} -> force re-login`)
         localStorage.removeItem('token')
         localStorage.removeItem('user')
-        // 跳登录页并带上来源 url，便于登录后回跳
         const ret = encodeURIComponent(window.location.pathname + window.location.search)
         window.location.href = `/login?return=${ret}`
       }
@@ -85,10 +81,24 @@ export const getReportByPartner = (params) => api.get('/reports/by-partner', { p
 export const getReportByCooperation = (params) => api.get('/reports/by-cooperation', { params })
 export const getReportByWinBid = (params) => api.get('/reports/by-win-bid', { params })
 export const exportReport = (params) => api.get('/reports/export', { params, responseType: 'blob' })
-export const exportFullReport = (params) => api.get('/reports/export-full', { params, responseType: 'blob' })
 export const getReportByFollowupStage = (params) => api.get('/reports/by-followup-stage', { params })
+export const exportFullReport = () => api.get('/reports/export-full', { responseType: 'blob' })
+export const getAIModelConfigs = () => api.get('/forms/ai-models')
+export const getAIModelPresets = () => api.get('/forms/ai-model-presets')
 export const analyzeReportWithAI = (data) => api.post('/reports/ai-analyze', data)
 export const askReportAssistant = (data) => api.post('/reports/ai-assistant', data)
+export const createAIModelConfig = (data) => api.post('/forms/ai-models', data)
+export const updateAIModelConfig = (id, data) => api.put(`/forms/ai-models/${id}`, data)
+export const deleteAIModelConfig = (id) => api.delete(`/forms/ai-models/${id}`)
+export const testAIModelConfig = (id, data) => api.post(`/forms/ai-models/${id}/test`, data)
+
+// Agent 系统提示词
+export const listAgentPrompts = (params) => api.get('/agent-prompts', { params })
+export const getActiveAgentPrompt = (role_key = 'default') => api.get('/agent-prompts/active', { params: { role_key } })
+export const createAgentPrompt = (data) => api.post('/agent-prompts', data)
+export const updateAgentPrompt = (id, data) => api.put(`/agent-prompts/${id}`, data)
+export const deleteAgentPrompt = (id) => api.delete(`/agent-prompts/${id}`)
+export const seedAgentPrompts = () => api.post('/agent-prompts/seed')
 
 // 项目跟单
 export const getFollowupStageOptions = () => api.get('/project-followups/stage-options')
@@ -108,6 +118,10 @@ export const updateFileStorageConfig = (data) => api.put('/file-storage/config',
 export const testFileStorageConnection = () => api.post('/file-storage/test-connection')
 export const previewFileStoragePath = (data) => api.post('/file-storage/preview-path', data)
 export const listStorageFiles = (data) => api.post('/file-storage/list-files', data)
+// ★ 诊断所有项目的存储路径（不修改 DB）
+export const diagnoseFileStorage = () => api.post('/file-storage/diagnose-all')
+// ★ 重建指定项目的 WebDAV 目录（仅 admin）
+export const rebuildProjectFolders = (data) => api.post('/file-storage/rebuild-project-folders', data).then(r => r.data)
 
 // 导出
 export const exportProjects = (params) => api.get('/export/projects', { params, responseType: 'blob' })
@@ -122,15 +136,10 @@ export const getFormTemplate = (id) => api.get(`/forms/templates/${id}`)
 export const createFormTemplate = (data) => api.post('/forms/templates', data)
 export const updateFormTemplate = (id, data) => api.put(`/forms/templates/${id}`, data)
 export const deleteFormTemplate = (id) => api.delete(`/forms/templates/${id}`)
-export const getAIModelConfigs = (params) => api.get('/forms/ai-models', { params })
-export const getAIModelPresets = () => api.get('/forms/ai-model-presets')
-export const createAIModelConfig = (data) => api.post('/forms/ai-models', data)
-export const updateAIModelConfig = (id, data) => api.put(`/forms/ai-models/${id}`, data)
-export const deleteAIModelConfig = (id) => api.delete(`/forms/ai-models/${id}`)
-export const testAIModelConfig = (id, data) => api.post(`/forms/ai-models/${id}/test`, data)
 export const getFormInstances = (params) => api.get('/forms/instances', { params })
 export const createFormInstance = (data) => api.post('/forms/instances', data)
 export const getFormInstance = (id) => api.get(`/forms/instances/${id}`)
+export const updateFormInstance = (id, payload) => api.put(`/forms/instances/${id}`, payload)
 export const deleteFormInstance = (id) => api.delete(`/forms/instances/${id}`)
 
 // ============ 存储区域 ============

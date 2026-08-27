@@ -96,6 +96,7 @@ class ProjectBase(BaseModel):
 
 class ProjectCreate(ProjectBase):
     responsible_sales: Optional[str] = Field(None, max_length=100)  # 责任销售可空（留空则用当前账号姓名）
+    source: Optional[str] = Field('channel', description="channel=渠道项目 / self=自营项目")
 
     @field_validator('tender_time', 'bid_time', mode='before')
     @classmethod
@@ -512,6 +513,7 @@ class AIModelTestResponse(BaseModel):
 class AIAnalysisRequest(BaseModel):
     model_id: Optional[int] = None
     prompt: str = Field(..., min_length=1)
+    system_prompt: Optional[str] = Field(default=None, max_length=4000)
     keyword: Optional[str] = None
     project_type: Optional[str] = None
     project_name: Optional[str] = None
@@ -545,6 +547,7 @@ class AIAnalysisResponse(BaseModel):
 class AIReportAssistantRequest(BaseModel):
     model_id: Optional[int] = None
     question: str = Field(..., min_length=1, max_length=2000)
+    system_prompt: Optional[str] = Field(default=None, max_length=4000)
     keyword: Optional[str] = None
     project_type: Optional[str] = None
     project_name: Optional[str] = None
@@ -560,11 +563,50 @@ class AIReportAssistantRequest(BaseModel):
 
 class AIReportAssistantResponse(BaseModel):
     assistant_name: str
+    mode: str = Field(default="skeleton")
     model: Optional[AIModelConfigResponse] = None
     total_rows: int
     summary_text: str
     answer: str
     tips: List[str] = Field(default_factory=list)
+
+
+# ============ Agent 系统提示词管理 ============
+
+class AgentPromptBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    role_key: str = Field(default='default', min_length=1, max_length=50,
+                          description="角色键，如 default / business_analyst / sales_expert / finance_expert")
+    content: str = Field(..., min_length=1, max_length=8000,
+                         description="系统提示词全文，会作为 system message 发送给 LLM")
+    description: Optional[str] = Field(default=None, max_length=500)
+    enabled: bool = True
+
+
+class AgentPromptCreate(AgentPromptBase):
+    pass
+
+
+class AgentPromptUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    role_key: Optional[str] = Field(default=None, min_length=1, max_length=50)
+    content: Optional[str] = Field(default=None, min_length=1, max_length=8000)
+    description: Optional[str] = Field(default=None, max_length=500)
+    enabled: Optional[bool] = None
+
+
+class AgentPromptResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    name: str
+    role_key: str
+    content: str
+    description: Optional[str] = None
+    enabled: bool
+    created_by: Optional[int] = None
+    created_by_name: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
 
 # ============ 存储区域 ============
@@ -700,6 +742,72 @@ class NotificationChannelResponse(BaseModel):
     name: str
     config: str  # JSON 字符串
     enabled: bool
+
+
+# ============ AI Agent ============
+class AgentAnalyzeRequest(BaseModel):
+    project_id: int
+    query: Optional[str] = None
+    analyze_types: List[str] = Field(default_factory=lambda: ["reliability", "sales_activity"])
+    top_k: int = Field(default=5, ge=1, le=20)
+    model_id: Optional[int] = None
+
+    @field_validator("analyze_types", mode="before")
+    @classmethod
+    def normalize_analyze_types(cls, v):
+        if not v:
+            return ["reliability", "sales_activity"]
+        items = [str(item).strip() for item in v if str(item).strip()]
+        return items or ["reliability", "sales_activity"]
+
+
+class EvidenceItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    source_type: str
+    source_id: Optional[int] = None
+    score: Optional[float] = None
+    snippet: str
+
+
+class FindingItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    title: str
+    detail: str
+    score: Optional[float] = None
+    evidences: List[EvidenceItem] = Field(default_factory=list)
+
+
+class AgentAnalyzeResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    project_id: int
+    reliability_score: float
+    sales_activity_score: float
+    findings: List[FindingItem] = Field(default_factory=list)
+    recommendations: List[str] = Field(default_factory=list)
+    evidences: List[EvidenceItem] = Field(default_factory=list)
+    rule_basis: Optional[dict] = None
+
+
+class AgentQueryRequest(BaseModel):
+    project_id: int
+    question: str = Field(..., min_length=1, max_length=2000)
+    top_k: int = Field(default=5, ge=1, le=20)
+    model_id: Optional[int] = None
+
+    @field_validator("question", mode="before")
+    @classmethod
+    def normalize_question(cls, v):
+        if v is None:
+            return v
+        return str(v).strip()
+
+
+class AgentQueryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    project_id: int
+    answer: str
+    sources: List[EvidenceItem] = Field(default_factory=list)
+    score: float
 
 
 class NotificationTemplateConfig(BaseModel):

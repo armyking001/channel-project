@@ -5,6 +5,14 @@ import { useNotificationStore } from '../stores/notifications'
 import ChangePasswordModal from './ChangePasswordModal'
 import NotificationBell from './NotificationBell'
 
+// AI 两个字母分别居中在自己的 1em 单元里：
+// 容器是 inline-flex 宽 2em，A 和 I 各占 1em flex 子项，子项内 text-align:center，
+// 让 A 落在第 1 个汉字的正中央，I 落在第 2 个汉字的正中央。
+const aiStyle = {
+  display: 'inline-flex',
+  fontFamily: '"PingFang SC","Microsoft YaHei","微软雅黑",sans-serif',
+}
+
 export default function Layout() {
   const { user, setAuth, logout } = useAuthStore()
   const navigate = useNavigate()
@@ -20,7 +28,6 @@ export default function Layout() {
       const token = localStorage.getItem('token')
       if (!token) return
       try {
-        const { getMe } = await import('../api')
         const r = await getMe()
         if (cancelled) return
         const fresh = r.data
@@ -90,35 +97,35 @@ export default function Layout() {
             draggable={false}
           />
           <div className="min-w-0 flex-1">
-            <h1 className="text-sm font-bold leading-tight whitespace-nowrap">销售项目管理系统V2.0</h1>
+            <h1 className="text-sm font-bold leading-tight whitespace-nowrap">销售项目管理系统V2.1</h1>
             <p className="text-xs text-gray-400 mt-0.5 truncate">{(user && user.real_name) + ' \u00b7 ' + (roleLabel[(user && user.role)] || '')}</p>
           </div>
         </div>
         <nav className="flex-1 p-4 space-y-2">
-          <Link to="/projects" className="block px-4 py-2 rounded hover:bg-gray-700 transition">📋 项目列表</Link>
+          <Link to="/projects" className="block w-full px-4 py-2 rounded hover:bg-gray-700 transition whitespace-nowrap">📋 项目列表</Link>
           {canApprove && (
-            <Link to="/approvals" className="block px-4 py-2 rounded hover:bg-gray-700 transition">✅ 审批管理</Link>
+            <Link to="/approvals" className="block w-full px-4 py-2 rounded hover:bg-gray-700 transition whitespace-nowrap">✅ 审批管理</Link>
           )}
           {!isArchive && (
-            <Link to="/project-followups" className="block px-4 py-2 rounded hover:bg-gray-700 transition">📈 项目跟单</Link>
+            <Link to="/project-followups" className="block w-full px-4 py-2 rounded hover:bg-gray-700 transition whitespace-nowrap">📈 项目跟单</Link>
           )}
-          <Link to="/reports" className="block px-4 py-2 rounded hover:bg-gray-700 transition">📊 AI报表</Link>
+          <Link to="/reports" className="block w-full px-4 py-2 rounded hover:bg-gray-700 transition whitespace-nowrap">📊 <span style={aiStyle}><span style={{ width: '1em', textAlign: 'center', display: 'inline-block' }}>A</span><span style={{ width: '1em', textAlign: 'center', display: 'inline-block' }}>I</span></span>报表</Link>
           {isAdmin && (
-            <Link to="/file-storage" className="block px-4 py-2 rounded hover:bg-gray-700 transition">🗂️ 存储区域</Link>
-          )}
-          {isAdmin && (
-            <Link to="/admin/users" className="block px-4 py-2 rounded hover:bg-gray-700 transition">👥 用户管理</Link>
+            <Link to="/admin/audit" className="block w-full px-4 py-2 rounded hover:bg-gray-700 transition whitespace-nowrap">📜 审计记录</Link>
           )}
           {isAdmin && (
-            <Link to="/admin/forms" className="block px-4 py-2 rounded hover:bg-gray-700 transition">📐 表单管理</Link>
+            <Link to="/file-storage" className="block w-full px-4 py-2 rounded hover:bg-gray-700 transition whitespace-nowrap">🗂️ 存储区域</Link>
           )}
           {isAdmin && (
-            <Link to="/admin/audit" className="block px-4 py-2 rounded hover:bg-gray-700 transition">📜 审计记录</Link>
+            <Link to="/admin/forms" className="block w-full px-4 py-2 rounded hover:bg-gray-700 transition whitespace-nowrap">📐 表单管理</Link>
           )}
           {isAdmin && (
-            <Link to="/admin/notifications" className="block px-4 py-2 rounded hover:bg-gray-700 transition">📣 通知管理</Link>
+            <Link to="/admin/users" className="block w-full px-4 py-2 rounded hover:bg-gray-700 transition whitespace-nowrap">👥 用户管理</Link>
           )}
-          <Link to="/notifications" className="block px-4 py-2 rounded hover:bg-gray-700 transition">🔔 通知中心</Link>
+          {isAdmin && (
+            <Link to="/admin/notifications" className="block w-full px-4 py-2 rounded hover:bg-gray-700 transition whitespace-nowrap">📣 通知管理</Link>
+          )}
+          <Link to="/notifications" className="block w-full px-4 py-2 rounded hover:bg-gray-700 transition whitespace-nowrap">🔔 通知中心</Link>
         </nav>
       </aside>
 

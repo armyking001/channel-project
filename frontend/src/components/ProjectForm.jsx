@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { createProject, updateProject, getUsers, previewFileStoragePath, listStorageFiles } from '../api'
+import { createProject, updateProject, getUsers, previewFileStoragePath, listStorageFiles, rebuildProjectFolders } from '../api'
 import { useAuthStore } from '../stores/auth'
 
 const Star = () => <span className="text-red-500 ml-1 font-bold" title="必填项">*</span>
@@ -33,16 +33,27 @@ function formatTime(ts) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
-// 去掉 https://host:port/ 或 http://host:port/ 前缀，只保留后面的路径部分
 function stripUrlPrefix(url) {
   if (!url) return ''
   return url.replace(/^https?:\/\/[^/]+\/+/, '')
 }
 
-export default function ProjectForm({ project, onClose, onSaved, onDelete, readOnly = false, withdrawMode = false }) {
+const DIAG_BADGE = {
+  ok:      { label: '✓ 正常', cls: 'bg-green-50 text-green-700 border-green-200' },
+  wrong:   { label: '⚠ 路径错误', cls: 'bg-red-50 text-red-700 border-red-300' },
+  empty:   { label: '⚠ 路径为空', cls: 'bg-red-50 text-red-700 border-red-300' },
+  unknown: { label: '? 未关联',   cls: 'bg-gray-50 text-gray-500 border-gray-200' },
+}
+
+export default function ProjectForm({ project, onClose, onSaved, onDelete, readOnly = false, withdrawMode = false, diagnoseResult = null, onRebuilt = null, onFilesUploaded = null }) {
   const { user: currentUser } = useAuthStore()
   const isEdit = !!project
   const isAdmin = currentUser?.role === 'admin'
+  const isSelfProject = project?.source === 'self'
+  const lblAmount = isSelfProject ? '预计落单金额' : '预计金额'
+  const lblCompany = isSelfProject ? '客户单位名称' : '公司名称'
+  const lblContact = isSelfProject ? '业主方联系人' : '联系人'
+  const lblPhone = isSelfProject ? '业主方联系方式' : '联系方式'
   const fileTenderRef = useRef(null)
   const fileBidRef = useRef(null)
 
@@ -74,15 +85,12 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
     is_sm: initial('is_sm', 'no'),
     win_bid_status: initial('win_bid_status', 'in_progress'),
     project_overview: initial('project_overview'),
-    storage_zone_id: initial('storage_zone_id') || 1,  // 默认走默认存储区域
+    storage_zone_id: initial('storage_zone_id') || 1,
   })
 
   const [errors, setErrors] = useState({})
 
-  // ===== 中标状态多次修改（管理员）相关状态 =====
-  // 是否已解锁中标状态（非首次修改时，弹窗验证通过后置为 true）
   const [winBidUnlocked, setWinBidUnlocked] = useState(false)
-  // 修改中标状态弹窗
   const [showWinBidModal, setShowWinBidModal] = useState(false)
   const [winBidReason, setWinBidReason] = useState('')
   const [winBidPassword, setWinBidPassword] = useState('')
@@ -93,28 +101,37 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
   const [uploadingTender, setUploadingTender] = useState(false)
   const [uploadingBid, setUploadingBid] = useState(false)
 
-  // 文件列表
   const [tenderFiles, setTenderFiles] = useState([])
   const [bidFiles, setBidFiles] = useState([])
-  // 重名覆盖确认
-  const [pendingConflict, setPendingConflict] = useState(null) // { folderType, files, existingNames }
-  const [pendingResolve, setPendingResolve] = useState(null) // Promise resolver
+  const [pendingConflict, setPendingConflict] = useState(null)
+
+  // ★ 重建按钮状态
+  const [rebuilding, setRebuilding] = useState(false)
+  const [rebuildMsg, setRebuildMsg] = useState('')
+  // ★ 用户点击「不重建」后关闭提示（仅本次会话内）
+  const [diagDismissed, setDiagDismissed] = useState(false)
+
+  // ★ 存储区域：渠道项目直接用「渠道项目登记表」模板的 storage_zone_id（后端自动解析）
+  // 编辑模式：保留原项目的 storage_zone_id
+  // 自营项目（DynamicForm 路径）：DynamicForm 自己处理 zone
 
   useEffect(() => {
     if (project?.tender_folder) setTenderPreview(project.tender_folder)
     if (project?.bid_folder) setBidPreview(project.bid_folder)
   }, [project])
 
-  // 拉取指定子目录下的文件列表（后端按 project_id 查真实存盘 folder）
+  // 当项目切换时，重置 dismiss 状态
+  useEffect(() => {
+    setDiagDismissed(false)
+    setRebuildMsg('')
+  }, [project?.id])
+
   const fetchFiles = async (projectName, folderType, creator) => {
     if (!projectName && !project?.id) return
     try {
-      const payload = {
-        folder_type: folderType,
-      }
+      const payload = { folder_type: folderType }
       if (project?.id) payload.project_id = project.id
       else {
-        // 新建项目（还没 id）：回退到 project_name + creator 拼装
         payload.project_name = projectName
         if (creator) {
           payload.creator_username = creator.username
@@ -135,11 +152,8 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
     }
   }
 
-  // 决定路径/列表用的"创建者"
-  // 编辑模式：优先用 project.creator（后端 list 接口会返回）；如果缺失则降级用当前用户
   const creatorForPath = (isEdit && project?.creator) || currentUser
 
-  // 统一的数据获取与刷新逻辑：监听核心依赖变化，避免并发请求竞争
   useEffect(() => {
     let isSubscribed = true
     if (!form.project_name) {
@@ -148,7 +162,6 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
       return
     }
 
-    // 同步设置初始预览路径
     if (project?.tender_folder) setTenderPreview(project.tender_folder)
     if (project?.bid_folder) setBidPreview(project.bid_folder)
 
@@ -158,8 +171,6 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
         creator_username: p?.username,
         creator_real_name: p?.real_name,
       }
-      // 必填校验：只有项目名称填了才预览文件夹路径
-      // 责任销售留空 → 后端会用当前账号姓名兑底（视为销售本人）
       const hasName = !!(form.project_name && form.project_name.trim())
       if (!hasName) {
         if (isSubscribed) {
@@ -169,15 +180,10 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
         }
         return
       }
-      // 责任销售兑底：空 → 当前账号姓名
-      const salesForPreview = (form.responsible_sales || '').trim() || (user?.real_name || user?.username || '')
+      const salesForPreview = (form.responsible_sales || '').trim() || (currentUser?.real_name || currentUser?.username || '')
       try {
-        // 1. 获取预览路径（自建项目需要传 source/storage_zone_id 让后端选择正确的 base_path）
-        // 编辑模式：使用 project 实际的 source/storage_zone_id
-        // 新建模式：默认 channel（渠道资料），用户也可以选择 self（自建项目，目前不暴露）
         const previewExtra = {
           source: project?.source || 'channel',
-          storage_zone_id: project?.storage_zone_id,
         }
         const [resTender, resBid] = await Promise.all([
           previewFileStoragePath({ project_name: form.project_name, folder_type: 'tender', responsible_sales: salesForPreview, ...creatorPayload, ...previewExtra }).catch(() => ({})),
@@ -188,7 +194,6 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
           setBidPreview((resBid?.data ?? resBid)?.bid_folder || (resBid?.data ?? resBid)?.path || '')
         }
 
-        // 2. 串行拉取文件列表，确保不会发生并发覆盖
         if (isSubscribed) {
           await fetchFiles(form.project_name, 'tender', p)
           await fetchFiles(form.project_name, 'bid', p)
@@ -208,8 +213,6 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
   useEffect(() => {
     getUsers().then(res => {
       const list = Array.isArray(res) ? res : (res.data || [])
-      // 后端已按角色返回候选审批人（上级链 + 系统管理员），这里不再过滤角色
-      // 但需要排除自己（不能选自己为审批人）
       setUsers(list.filter(u => u.id !== undefined))
     }).catch(() => {})
   }, [])
@@ -217,8 +220,6 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
   const validate = () => {
     const errs = {}
     if (!form.project_name?.trim()) errs.project_name = '项目名称必填'
-    // 责任销售非必填：留空 → 后端使用当前账号姓名
-    // （校验留空，但服务端会兜底）
     if (!form.project_type) errs.project_type = '项目类型必填'
     if (form.expected_amount === '' || form.expected_amount === null || form.expected_amount === undefined) {
       errs.expected_amount = '预计金额必填'
@@ -258,8 +259,11 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
       fee_amount: form.fee_mode === 'charged' ? (parseFloat(form.fee_amount) || 0) * 10000 : null,
       expected_amount: (parseFloat(form.expected_amount) || 0),
       project_amount: (parseFloat(form.expected_amount) || 0) * 10000,
+      // ★ 存储区域：渠道项目走默认老单例（后端会按 FormTemplate 自动选 zone）
+      // 编辑模式不变（保留原项目的 storage_zone_id）
+      // 自营项目（source='self'）从 form.storage_zone_id 取
+      source: 'channel',
     }
-    // 管理员非首次修改中标状态：把弹窗输入的理由和密码一起传给后端
     if (isAdmin && isEdit && project?.win_bid_status_set_at && winBidUnlocked) {
       data.win_bid_change_reason = winBidReason.trim()
       data.admin_password_verify = winBidPassword
@@ -273,8 +277,6 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
     }
   }
 
-  // 拦截选中：先做重名校验，弹出确认后才真正上传
-  // 选择文件后：先向服务器实时查已有文件 → 再决定是否弹覆盖确认
   const handleFilesPicked = async (folderType, files) => {
     if (!files || files.length === 0) return
     if (!form.project_name && !project?.project_name) {
@@ -282,7 +284,6 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
     }
     const projectName = form.project_name || project.project_name
 
-    // 服务器实时查询已有文件（不再用前端 state）
     let existingNames = new Set()
     try {
       const listPayload = { folder_type: folderType }
@@ -318,7 +319,6 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
     })
   }
 
-  // 真正执行上传（被 handleFilesPicked 与 Modal 确认后调用）
   const doUpload = async (folderType, files, overwrite = false) => {
     if (!files || files.length === 0) return
     const fd = new FormData()
@@ -343,12 +343,14 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
         return
       }
       await fetchFiles(form.project_name || project.project_name, folderType, creatorForPath)
-      // 上传结果提示：成功 / 部分失败 / 完全失败 三种情况
       const okCount = data.uploaded?.length || 0
       const failCount = data.failed?.length || 0
       if (failCount === 0) {
         const tip = overwrite && okCount > 0 ? `成功覆盖 ${okCount} 个文件` : `成功上传 ${okCount} 个文件`
         alert(tip)
+        // ★ 编辑状态修改后通知父组件刷新列表（保证查看状态打开时拿到最新数据）
+        //   只刷数据不关弹窗 → 用 onFilesUploaded；不要调 onSaved（会关弹窗）
+        if (okCount > 0) onFilesUploaded?.()
       } else {
         alert(`上传完成：成功 ${okCount}，失败 ${failCount}\n失败原因：${data.failed.map(f => f.error || f.name).join('; ')}`)
       }
@@ -359,7 +361,6 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
     }
   }
 
-  // Modal 中点击"确认覆盖"——上传全部（含冲突）并 overwrite=true
   const confirmOverwrite = () => {
     if (!pendingConflict) return
     const { folderType, allFiles } = pendingConflict
@@ -369,7 +370,6 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
     doUpload(folderType, allFiles, true)
   }
 
-  // Modal 中点击"取消"——仅上传非冲突文件
   const cancelOverwrite = () => {
     if (!pendingConflict) return
     const { folderType, nonConflicts } = pendingConflict
@@ -393,45 +393,43 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
   const renderDropZone = (folderType, preview, uploading, inputRef) => {
     const displayPath = stripUrlPrefix(preview)
     return (
-    <div
-      {...makeDropHandlers(folderType)}
-      onClick={() => inputRef.current?.click()}
-      className="border-2 border-dashed border-gray-300 rounded-lg px-4 py-4 cursor-pointer hover:border-blue-500 hover:bg-blue-50 transition min-h-[96px] flex flex-col justify-center"
-    >
-      {displayPath && (
-        <div className="text-[11px] text-gray-500 mb-2 truncate text-center" title={displayPath}>
-          <span className="inline-block px-2 py-0.5 bg-blue-50 text-blue-700 rounded border border-blue-100">
-            📁 {displayPath.length > 60 ? '...' + displayPath.slice(-60) : displayPath}
-          </span>
-        </div>
-      )}
-      <div className="text-center text-sm text-gray-500">
-        {uploading ? (
-          <span className="text-blue-600">⏳ 上传中...</span>
-        ) : (
-          <div className="space-y-1">
-            <div className="text-base">📎 拖拽文件到此处</div>
-            <div className="text-xs text-gray-400">或 <span className="text-blue-600">点击选择文件</span></div>
+      <div
+        {...makeDropHandlers(folderType)}
+        onClick={() => inputRef.current?.click()}
+        className="border-2 border-dashed border-gray-300 rounded-lg px-4 py-4 cursor-pointer hover:border-blue-500 hover:bg-blue-50 transition min-h-[96px] flex flex-col justify-center"
+      >
+        {displayPath && (
+          <div className="text-[11px] text-gray-500 mb-2 truncate text-center" title={displayPath}>
+            <span className="inline-block px-2 py-0.5 bg-blue-50 text-blue-700 rounded border border-blue-100">
+              📁 {displayPath.length > 60 ? '...' + displayPath.slice(-60) : displayPath}
+            </span>
           </div>
         )}
+        <div className="text-center text-sm text-gray-500">
+          {uploading ? (
+            <span className="text-blue-600">⏳ 上传中...</span>
+          ) : (
+            <div className="space-y-1">
+              <div className="text-base">📎 拖拽文件到此处</div>
+              <div className="text-xs text-gray-400">或 <span className="text-blue-600">点击选择文件</span></div>
+            </div>
+          )}
+        </div>
+        <input
+          ref={inputRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={(e) => {
+            const list = Array.from(e.target.files)
+            handleFilesPicked(folderType, list)
+          }}
+        />
       </div>
-      <input
-        ref={inputRef}
-        type="file"
-        multiple
-        className="hidden"
-        onChange={(e) => {
-          const list = Array.from(e.target.files)
-          // 不要在这里清空 value，留给 confirm/cancel 处理，避免覆盖弹窗还没出现就被清掉
-          handleFilesPicked(folderType, list)
-        }}
-      />
-    </div>
     )
   }
 
-  // 文件列表（含详细资料：上传者/时间/大小/完整路径）
-  const renderFileList = (fileList, folderType) => {
+  const renderFileList = (fileList, folderType, readOnly = false) => {
     if (!fileList || fileList.length === 0) {
       return (
         <div className="mt-2 text-xs text-gray-400 text-center py-3 border border-dashed border-gray-200 rounded">
@@ -443,6 +441,7 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
       <div className="mt-2 border border-gray-200 rounded-md bg-white">
         <div className="px-3 py-1.5 text-xs font-semibold text-gray-600 bg-gray-50 border-b border-gray-200 rounded-t-md flex items-center justify-between">
           <span>📚 已上传文件（共 {fileList.length} 个）</span>
+          {!readOnly && (
           <button
             type="button"
             onClick={async () => {
@@ -468,6 +467,7 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
           >
             🔄 刷新
           </button>
+          )}
         </div>
         <ul className="divide-y divide-gray-100 max-h-56 overflow-y-auto">
           {fileList.map(f => {
@@ -492,9 +492,108 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
     )
   }
 
+  // ★ 诊断面板（编辑模式 + readOnly 都显示；新建模式不显示）
+  const renderDiagnosePanel = () => {
+    if (!isEdit) return null
+    if (!diagnoseResult) return null
+    const tender = diagnoseResult.tender || {}
+    const bid = diagnoseResult.bid || {}
+    const tenderBad = tender.status === 'wrong' || tender.status === 'empty'
+    const bidBad = bid.status === 'wrong' || bid.status === 'empty'
+    const anyBad = tenderBad || bidBad
+    const unknown = tender.status === 'unknown' && bid.status === 'unknown'
+
+    if (!anyBad && !unknown) {
+      return (
+        <div className="mb-3 p-3 bg-green-50 border border-green-200 rounded text-xs text-green-700">
+          ✓ 存储路径正常：招标资料 + 投标文档均可访问。
+        </div>
+      )
+    }
+    if (unknown) {
+      return (
+        <div className="mb-3 p-3 bg-gray-50 border border-gray-200 rounded text-xs text-gray-600">
+          ℹ 当前项目未关联 storage_zone，无法校验文件路径。请先在「存储区域」管理中给表单绑定一个区域。
+        </div>
+      )
+    }
+    if (diagDismissed) {
+      return (
+        <div className="mb-3 p-3 bg-gray-50 border border-gray-200 rounded text-xs text-gray-600">
+          ⓘ 已忽略路径错误提示。如需重新检查请关闭重开对话框。
+        </div>
+      )
+    }
+    return (
+      <div className="mb-3 p-3 bg-red-50 border-2 border-red-300 rounded">
+        <div className="text-sm font-bold text-red-700 mb-2">
+          ⚠ 存储路径错误（系统扫描到的问题）
+        </div>
+        <ul className="text-xs text-red-700 space-y-1 mb-3">
+          {tenderBad && (
+            <li>• <b>招标资料</b>：{tender.msg || '目录不可访问'}
+              {project?.tender_folder && (
+                <span className="ml-2 text-red-500 font-mono text-[11px]">{stripUrlPrefix(project.tender_folder)}</span>
+              )}
+            </li>
+          )}
+          {bidBad && (
+            <li>• <b>投标文档</b>：{bid.msg || '目录不可访问'}
+              {project?.bid_folder && (
+                <span className="ml-2 text-red-500 font-mono text-[11px]">{stripUrlPrefix(project.bid_folder)}</span>
+              )}
+            </li>
+          )}
+        </ul>
+        <div className="text-xs text-red-600 mb-3">
+          系统不会自动修改 DB。你可以：
+          <ol className="list-decimal ml-5 mt-1 space-y-0.5">
+            <li>让管理员按上面显示的路径在 NAS 上手动建好对应目录（自建路径），然后点击「不重建」即可使用；</li>
+            <li>或点击「重建」让系统按 DB 中保存的路径自动 MKCOL 创建子目录。</li>
+          </ol>
+        </div>
+        <div className="flex gap-2">
+          {isAdmin && project?.id && (
+            <button
+              type="button"
+              disabled={rebuilding}
+              onClick={async () => {
+                if (!confirm(`确定要重建项目「${project.project_name}」的 WebDAV 目录吗？\n将按 DB 中保存的 tender_folder / bid_folder 调用 MKCOL。`)) return
+                setRebuilding(true)
+                setRebuildMsg('')
+                try {
+                  const res = await rebuildProjectFolders({ project_id: project.id })
+                  const data = res?.data ?? res
+                  setRebuildMsg(data?.message || '✓ 重建完成')
+                  onRebuilt?.()
+                } catch (e) {
+                  setRebuildMsg('✗ 重建失败: ' + (e?.response?.data?.detail || e?.message || '未知错误'))
+                } finally {
+                  setRebuilding(false)
+                }
+              }}
+              className={`px-4 py-1.5 text-xs rounded text-white transition shadow-sm ${rebuilding ? 'bg-amber-400 cursor-wait' : 'bg-amber-600 hover:bg-amber-700'}`}
+            >
+              {rebuilding ? '⏳ 重建中...' : '🔧 重建'}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setDiagDismissed(true)}
+            className="px-4 py-1.5 text-xs rounded border border-gray-400 text-gray-700 hover:bg-gray-100 transition"
+          >
+            不重建（我已自建路径）
+          </button>
+        </div>
+        {rebuildMsg && (
+          <div className="mt-2 text-xs text-red-700 font-medium">{rebuildMsg}</div>
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className="w-full bg-white">
-      {/* 顶部标题栏 */}
       <div className="flex items-center justify-between pb-4 mb-4 border-b">
         <h3 className="text-xl font-bold text-gray-800">
           {readOnly ? '查看项目详情' :
@@ -518,8 +617,7 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
 
       <form onSubmit={handleSubmit}>
 
-        {/* 编辑模式：展示项目摘要 + 文件管理 */}
-        {isEdit && (
+        {isEdit && !readOnly && (
           <div className="mb-5 p-4 bg-blue-50 border border-blue-200 rounded-lg">
             <div className="text-sm font-bold text-blue-800 mb-3 flex items-center gap-2">
               📋 项目信息
@@ -528,24 +626,18 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
             <div className="grid grid-cols-3 gap-x-8 gap-y-2 text-sm">
               <div><span className="text-gray-500">项目名称：</span><span className="text-gray-800">{form.project_name}</span></div>
               <div><span className="text-gray-500">项目类型：</span><span className="text-gray-800">{form.project_type}</span></div>
-              <div><span className="text-gray-500">预计金额：</span><span className="text-gray-800">{form.expected_amount} 万元</span></div>
-              <div><span className="text-gray-500">合作公司：</span><span className="text-gray-800">{form.partner_company}</span></div>
-              <div><span className="text-gray-500">联系人：</span><span className="text-gray-800">{form.contact_person}</span></div>
-              <div><span className="text-gray-500">联系方式：</span><span className="text-gray-800">{form.contact_info}</span></div>
+              <div><span className="text-gray-500">{lblAmount}：</span><span className="text-gray-800">{form.expected_amount} 万元</span></div>
+              <div><span className="text-gray-500">{lblCompany}：</span><span className="text-gray-800">{form.partner_company}</span></div>
+              <div><span className="text-gray-500">{lblContact}：</span><span className="text-gray-800">{form.contact_person}</span></div>
+              <div><span className="text-gray-500">{lblPhone}：</span><span className="text-gray-800">{form.contact_info}</span></div>
             </div>
-            
-            {/* 管理员可修改中标状态 */}
+
             {isAdmin && (
               <div className="mt-3 pt-3 border-t border-blue-200">
                 <div className="flex items-center gap-3 flex-wrap">
                   <label className="text-sm font-medium text-gray-700">
                     中标状态{project?.win_bid_status_set_at ? (winBidUnlocked ? '（已解锁，可再次修改）' : '（已锁定）') : '（可修改）'}：
                   </label>
-                  {/* 显示逻辑：
-                      - 首次修改（set_at 为空）：直接显示下拉框
-                      - 非首次未解锁（set_at 存在，unlocked=false）：显示文本 + "修改中标状态"按钮
-                      - 非首次已解锁（set_at 存在，unlocked=true）：显示下拉框
-                  */}
                   {project?.win_bid_status_set_at && !winBidUnlocked ? (
                     <>
                       <span className="text-sm font-semibold text-gray-700">
@@ -586,10 +678,8 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
           </div>
         )}
 
-        {/* 只读查看模式：显示所有字段 */}
         {readOnly && (
           <>
-            {/* 区域 1: 项目基本信息 */}
             <div className="mb-5">
               <div className="bg-gray-100 border-l-4 border-gray-400 px-3 py-1.5 mb-3">
                 <span className="text-sm font-bold text-gray-700">项目基本信息</span>
@@ -612,7 +702,7 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
                   <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.project_type || '-'}</div>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-500 mb-1">预计金额（万元）</label>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">{lblAmount}（万元）</label>
                   <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.expected_amount || '-'}</div>
                 </div>
                 <div>
@@ -634,14 +724,13 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
               </div>
             </div>
 
-            {/* 区域 2: 合作基本情况 */}
             <div className="mb-5">
               <div className="bg-gray-100 border-l-4 border-gray-400 px-3 py-1.5 mb-3">
                 <span className="text-sm font-bold text-gray-700">合作基本情况</span>
               </div>
               <div className="grid grid-cols-2 gap-x-8 gap-y-3">
                 <div>
-                  <label className="block text-sm font-medium text-gray-500 mb-1">公司名称</label>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">{lblCompany}</label>
                   <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.partner_company || '-'}</div>
                 </div>
                 <div>
@@ -657,17 +746,16 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
                   <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.legal_representative || '-'}</div>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-500 mb-1">联系人</label>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">{lblContact}</label>
                   <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.contact_person || '-'}</div>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-500 mb-1">联系方式</label>
+                  <label className="block text-sm font-medium text-gray-500 mb-1">{lblPhone}</label>
                   <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-800">{form.contact_info || '-'}</div>
                 </div>
               </div>
             </div>
 
-            {/* 区域 3: 合作模式与费用 */}
             <div className="mb-5">
               <div className="bg-gray-100 border-l-4 border-gray-400 px-3 py-1.5 mb-3">
                 <span className="text-sm font-bold text-gray-700">合作模式与费用</span>
@@ -700,10 +788,8 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
           </>
         )}
 
-        {/* 新建模式/撤回修改 模式表单 */}
         {!readOnly && (!isEdit || withdrawMode) && (
           <>
-            {/* 区域 1: 项目基本信息 */}
             <div className="mb-5">
               <div className={`${withdrawMode ? 'bg-purple-50 border-purple-500' : 'bg-green-50 border-green-500'} border-l-4 px-3 py-1.5 mb-3`}>
                 <span className={`text-sm font-bold ${withdrawMode ? 'text-purple-700' : 'text-green-700'}`}>项目基本信息</span>
@@ -754,7 +840,7 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
                   </select>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">预计金额（万元）<Star /></label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">{lblAmount}（万元）<Star /></label>
                   <input type="number" step="0.01" value={form.expected_amount}
                     onChange={e => setForm(f => ({ ...f, expected_amount: e.target.value }))}
                     placeholder="0.00"
@@ -789,14 +875,13 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
               </div>
             </div>
 
-            {/* 区域 2: 合作基本情况 */}
             <div className="mb-5">
               <div className="bg-green-50 border-l-4 border-green-500 px-3 py-1.5 mb-3">
                 <span className="text-sm font-bold text-green-700">合作基本情况</span>
               </div>
               <div className="grid grid-cols-2 gap-x-8 gap-y-3">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">公司名称<Star /></label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">{lblCompany}<Star /></label>
                   <input type="text" value={form.partner_company}
                     onChange={e => setForm(f => ({ ...f, partner_company: e.target.value }))}
                     placeholder="请输入公司名称"
@@ -824,14 +909,14 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
                     className={inputCls} />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">联系人<Star /></label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">{lblContact}<Star /></label>
                   <input type="text" value={form.contact_person}
                     onChange={e => setForm(f => ({ ...f, contact_person: e.target.value }))}
                     placeholder="请输入联系人"
                     className={errors.contact_person ? inputErrCls : inputCls} />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">联系方式<Star /></label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">{lblPhone}<Star /></label>
                   <input type="text" value={form.contact_info}
                     onChange={e => setForm(f => ({ ...f, contact_info: e.target.value }))}
                     placeholder="请输入联系方式"
@@ -878,7 +963,6 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
               </div>
             </div>
 
-            {/* 区域 3: 项目基本情况 */}
             <div className="mb-5">
               <div className="bg-green-50 border-l-4 border-green-500 px-3 py-1.5 mb-3">
                 <span className="text-sm font-bold text-green-700">项目基本情况</span>
@@ -894,26 +978,44 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
           </>
         )}
 
-        {/* 区域 4: 文件管理（编辑+新建都显示） */}
+        {/* 区域 4: 文件管理（编辑+新建显示完整上传；查看模式只显示已有文件，不允许上传/删除） */}
         <div className="mb-5">
-          <div className="bg-green-50 border-l-4 border-green-500 px-3 py-1.5 mb-3">
+          <div className="bg-green-50 border-l-4 border-green-500 px-3 py-1.5 mb-3 flex items-center justify-between">
             <span className="text-sm font-bold text-green-700">文件管理</span>
+            {/* 诊断行内小徽章（编辑模式） */}
+            {!readOnly && isEdit && diagnoseResult && (() => {
+              const tender = diagnoseResult.tender || {}
+              const bid = diagnoseResult.bid || {}
+              const tenderBad = tender.status === 'wrong' || tender.status === 'empty'
+              const bidBad = bid.status === 'wrong' || bid.status === 'empty'
+              if (!tenderBad && !bidBad) {
+                return <span className="text-xs text-green-700">✓ 路径正常</span>
+              }
+              return <span className="text-xs text-red-700 font-semibold">⚠ 路径异常（详见下方）</span>
+            })()}
           </div>
+
+          {/* ★ 诊断面板：仅编辑模式渲染（重建/不重建按钮） */}
+          {!readOnly && renderDiagnosePanel()}
+
           <div className="grid grid-cols-2 gap-x-8 gap-y-3">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">招标资料上传</label>
-              {renderDropZone('tender', tenderPreview, uploadingTender, fileTenderRef)}
-              {renderFileList(tenderFiles, 'tender')}
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                招标资料{readOnly ? '' : '上传'}
+              </label>
+              {!readOnly && renderDropZone('tender', tenderPreview, uploadingTender, fileTenderRef)}
+              {renderFileList(tenderFiles, 'tender', readOnly)}
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">投标文档及其他资料上传</label>
-              {renderDropZone('bid', bidPreview, uploadingBid, fileBidRef)}
-              {renderFileList(bidFiles, 'bid')}
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                投标文档及其他资料{readOnly ? '' : '上传'}
+              </label>
+              {!readOnly && renderDropZone('bid', bidPreview, uploadingBid, fileBidRef)}
+              {renderFileList(bidFiles, 'bid', readOnly)}
             </div>
           </div>
         </div>
 
-        {/* 区域 5: 审批人（只读显示，由系统自动分配） */}
         {(!isEdit || withdrawMode) && (
           <div className="mb-5">
             <div className={`${withdrawMode ? 'bg-purple-50 border-purple-500' : 'bg-green-50 border-green-500'} border-l-4 px-3 py-1.5 mb-3`}>
@@ -940,9 +1042,7 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
           </div>
         )}
 
-        {/* 底部按钮 */}
         <div className="flex justify-between gap-3 pt-5 border-t mt-6">
-          {/* 左侧：撤回模式下显示删除项目按钮 */}
           {!readOnly && withdrawMode && onDelete && (
             <button type="button" onClick={async () => {
               if (!confirm('确定删除此项目吗？\n注：NAS 上的项目目录和文件不会被删除。')) return
@@ -980,7 +1080,6 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
         </div>
       </form>
 
-      {/* 重名覆盖确认弹窗（替代浏览器原生的 window.confirm） */}
       {pendingConflict && (
         <div className="fixed inset-0 z-[60] bg-black/50 flex items-center justify-center p-4"
              onClick={(e) => { if (e.target === e.currentTarget) cancelOverwrite() }}>
@@ -1014,7 +1113,6 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
         </div>
       )}
 
-      {/* 中标状态再次修改 - 理由 + 密码验证弹窗 */}
       {showWinBidModal && (
         <div className="fixed inset-0 z-[70] bg-black/50 flex items-center justify-center p-4"
              onClick={(e) => { if (e.target === e.currentTarget) setShowWinBidModal(false) }}>
@@ -1026,7 +1124,6 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
               项目「{project?.project_name}」的中标状态已设置过，再次修改需填写理由并验证管理员密码。
             </p>
 
-            {/* 修改理由 */}
             <div className="mb-4">
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 修改理由<span className="text-red-500 ml-1">*</span>
@@ -1040,7 +1137,6 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
               />
             </div>
 
-            {/* 管理员密码 */}
             <div className="mb-4">
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 管理员密码<span className="text-red-500 ml-1">*</span>
@@ -1071,7 +1167,6 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
               <button
                 type="button"
                 onClick={() => {
-                  // 前端基本校验
                   if (!winBidReason.trim()) {
                     setWinBidModalError('请填写修改理由')
                     return

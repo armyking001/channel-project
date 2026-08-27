@@ -35,7 +35,11 @@ export default function Projects() {
   const [showApproveModal, setShowApproveModal] = useState(false)
   const [approveComment, setApproveComment] = useState('')
   const [selfFormTemplate, setSelfFormTemplate] = useState(null)  // 自建项目表单模板
-  const [showSelfForm, setShowSelfForm] = useState(false)  // 自建项目表单弹窗
+  const [channelFormTemplate, setChannelFormTemplate] = useState(null)  // 渠道项目表单模板
+  const [showSelfForm, setShowSelfForm] = useState(false)  // 自建项目新建弹窗
+  const [showSelfViewForm, setShowSelfViewForm] = useState(false)  // 自建项目查看弹窗
+  const [showChannelForm, setShowChannelForm] = useState(false)  // 渠道项目新建弹窗
+  const [showChannelViewForm, setShowChannelViewForm] = useState(false)  // 渠道项目查看弹窗
 
   // 加载自建项目表单模板
   const loadSelfFormTemplate = async () => {
@@ -59,6 +63,61 @@ export default function Projects() {
   const handleSelfFormNew = async () => {
     const tpl = await loadSelfFormTemplate()
     if (tpl) setShowSelfForm(true)
+  }
+
+  const handleSelfFormView = async (p) => {
+    setEditData(p)
+    const tpl = await loadSelfFormTemplate()
+    if (tpl) setShowSelfViewForm(true)
+  }
+
+  // 加载渠道项目表单模板
+  const loadChannelFormTemplate = async () => {
+    try {
+      const res = await getFormTemplates()
+      const tpl = res.data.find(t => t.name.includes('渠道项目'))
+      if (tpl) {
+        setChannelFormTemplate(tpl)
+        return tpl
+      } else {
+        alert('未找到"渠道项目登记表"模板，请先在表单管理中创建名称包含"渠道项目"的表单模板')
+        return null
+      }
+    } catch (e) {
+      alert('加载表单模板失败: ' + (e.response?.data?.detail || e.message))
+      return null
+    }
+  }
+
+  const handleChannelFormView = async (p) => {
+    setEditData(p)
+    const tpl = await loadChannelFormTemplate()
+    if (tpl) setShowChannelViewForm(true)
+  }
+
+  // 渠道项目新建：与自营项目新建保持一致，走 DynamicForm，使用 form_templates 表里最新的模板
+  const handleChannelFormNew = async () => {
+    const tpl = await loadChannelFormTemplate()
+    if (tpl) {
+      setEditData(null)
+      setShowChannelForm(true)
+    }
+  }
+
+  const handleViewProject = (p) => {
+    if (p.source === 'self' && p.form_instance_id) {
+      handleSelfFormView(p)
+    } else if (p.source === 'channel' && p.form_instance_id) {
+      handleChannelFormView(p)
+    } else {
+      setEditData(p)
+      setShowViewForm(true)
+    }
+  }
+
+  const handleEditProject = (p) => {
+    setEditData(p)
+    setShowForm(true)
   }
 
   const fetchProjects = async () => {
@@ -140,7 +199,7 @@ export default function Projects() {
             自营项目新建
           </button>
           <button
-            onClick={() => { setEditData(null); setShowForm(true) }}
+            onClick={handleChannelFormNew}
             className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 transition text-sm"
           >
             渠道项目新建
@@ -284,8 +343,8 @@ export default function Projects() {
                     if (isAdmin) {
                       return (
                         <>
-                          <button onClick={() => { setEditData(p); setShowForm(true) }} className="text-blue-600 hover:underline">编辑</button>
-                          <button onClick={() => { setEditData(p); setShowViewForm(true) }} className="text-gray-600 hover:underline">查看</button>
+                          <button onClick={() => handleEditProject(p)} className="text-blue-600 hover:underline">编辑</button>
+                          <button onClick={() => handleViewProject(p)} className="text-gray-600 hover:underline">查看</button>
                           <button onClick={() => handleDelete(p.id)} className="text-red-600 hover:underline">删除</button>
                         </>
                       )
@@ -294,21 +353,21 @@ export default function Projects() {
                     // 重要账号：只查看（编辑/审批去审批管理）
                     if (user?.role === 'important') {
                       return (
-                        <button onClick={() => { setEditData(p); setShowViewForm(true) }} className="text-gray-600 hover:underline">查看</button>
+                        <button onClick={() => handleViewProject(p)} className="text-gray-600 hover:underline">查看</button>
                       )
                     }
 
                     // 档案管理：只查看
                     if (isArchive) {
                       return (
-                        <button onClick={() => { setEditData(p); setShowViewForm(true) }} className="text-gray-600 hover:underline">查看</button>
+                        <button onClick={() => handleViewProject(p)} className="text-gray-600 hover:underline">查看</button>
                       )
                     }
 
                     // 普通账号：编辑（上传文件）+ 查看 +（自己的项目在待审批/已驳回时可撤回）
                     const buttons = [
                       <button key="edit" onClick={() => { setEditData(p); setShowForm(true) }} className="text-blue-600 hover:underline">编辑</button>,
-                      <button key="view" onClick={() => { setEditData(p); setShowViewForm(true) }} className="text-gray-600 hover:underline">查看</button>,
+                      <button key="view" onClick={() => handleViewProject(p)} className="text-gray-600 hover:underline">查看</button>,
                     ]
                     // 自己的项目：待审批/已驳回时可撤回
                     if (creator && (status === 'pending_approval' || status === 'rejected')) {
@@ -380,7 +439,7 @@ export default function Projects() {
         </div>
       )}
 
-      {/* 自建项目表单弹窗 */}
+      {/* 自建项目新建弹窗 */}
       {showSelfForm && selfFormTemplate && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-lg shadow-2xl max-h-[92vh] overflow-auto w-[1100px] max-w-[95vw] p-6">
@@ -388,6 +447,51 @@ export default function Projects() {
               template={selfFormTemplate}
               onClose={() => setShowSelfForm(false)}
               onSubmitted={() => { setShowSelfForm(false); fetchProjects() }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* 自建项目查看弹窗（只读模式，格式与新建一致） */}
+      {showSelfViewForm && selfFormTemplate && editData && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-2xl max-h-[92vh] overflow-auto w-[1100px] max-w-[95vw] p-6">
+            <DynamicForm
+              template={selfFormTemplate}
+              instanceId={editData.form_instance_id}
+              projectId={editData.id}
+              readOnly={true}
+              onClose={() => { setShowSelfViewForm(false); setEditData(null) }}
+              onSubmitted={() => { setShowSelfViewForm(false); fetchProjects() }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* 渠道项目新建弹窗（与自营项目新建保持一致） */}
+      {showChannelForm && channelFormTemplate && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-2xl max-h-[92vh] overflow-auto w-[1100px] max-w-[95vw] p-6">
+            <DynamicForm
+              template={channelFormTemplate}
+              onClose={() => setShowChannelForm(false)}
+              onSubmitted={() => { setShowChannelForm(false); fetchProjects() }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* 渠道项目查看弹窗（只读模式，格式与新建一致） */}
+      {showChannelViewForm && channelFormTemplate && editData && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-2xl max-h-[92vh] overflow-auto w-[1100px] max-w-[95vw] p-6">
+            <DynamicForm
+              template={channelFormTemplate}
+              instanceId={editData.form_instance_id}
+              projectId={editData.id}
+              readOnly={true}
+              onClose={() => { setShowChannelViewForm(false); setEditData(null) }}
+              onSubmitted={() => { setShowChannelViewForm(false); fetchProjects() }}
             />
           </div>
         </div>

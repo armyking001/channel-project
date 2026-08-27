@@ -11,7 +11,7 @@ import yaml
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app.database import engine, Base
-from app.routers import auth, users, projects, approvals, reports, file_storage, forms, storage_zones, project_followups, system as system_router
+from app.routers import auth, users, projects, approvals, reports, file_storage, forms, storage_zones, project_followups, agents, agent_prompts, system as system_router
 from app.routers.audit import router as audit_router
 from app.routers.notifications_ws import router as notifications_router, ws_router as notifications_ws_router
 
@@ -556,8 +556,8 @@ async def lifespan(app: FastAPI):
     engine.dispose()
 
 app = FastAPI(
-    title="销售项目管理系统V2.0",
-    version="2.0.0",
+    title="销售项目管理系统V2.1",
+    version="2.1.0",
     lifespan=lifespan
 )
 
@@ -611,6 +611,8 @@ app.include_router(system_router.router)
 app.include_router(forms.router)
 app.include_router(storage_zones.router)
 app.include_router(project_followups.router)
+app.include_router(agents.router)
+app.include_router(agent_prompts.router)
 app.include_router(notifications_router)
 app.include_router(notifications_ws_router)
 
@@ -623,7 +625,7 @@ def health_check():
 def root_redirect():
     if os.path.exists(os.path.join(STATIC_DIR, "index.html")):
         return RedirectResponse(url="/admin/")
-    return {"message": "项目管理系统V2.0 API", "docs": "/docs", "admin_ui": "/admin/"}
+    return {"message": "项目管理系统V2.1 API", "docs": "/docs", "admin_ui": "/admin/"}
 
 NO_CACHE_HEADERS = {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"}
 

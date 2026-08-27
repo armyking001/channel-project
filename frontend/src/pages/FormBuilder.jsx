@@ -68,7 +68,7 @@ export default function FormBuilder() {
   // 加载存储区域列表
   useEffect(() => {
     listStorageZones().then(r => {
-      const zones = r.data.items || []
+      const zones = Array.isArray(r?.data) ? r.data : (r?.data?.items || [])
       setStorageZones(zones)
     }).catch(() => {})
   }, [])

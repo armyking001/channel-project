@@ -3,6 +3,8 @@
 - 测试连通性
 - 预览项目路径
 - 拖拽上传到指定子目录（tender/bid）
+- 诊断所有项目的存储路径（不修改 DB）
+- 重建指定项目的 WebDAV 目录（仅管理员）
 """
 import logging
 import os
@@ -29,7 +31,6 @@ from app.services.audit import write_audit
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix='/api/file-storage', tags=['文件管理'])
 
-
 def _ensure_config(db: Session) -> FileStorageConfig:
     cfg = db.query(FileStorageConfig).filter(FileStorageConfig.id == 1).first()
     if not cfg:
@@ -39,6 +40,39 @@ def _ensure_config(db: Session) -> FileStorageConfig:
         db.refresh(cfg)
     return cfg
 
+def _resolve_config_for_project(db: Session, project_id) -> FileStorageConfig:
+    """根据 project_id 反查正确的 cfg（StorageZone 优先；fallback 老单例）
+
+    用途：list/upload/delete 三个端点必须用项目实际关联的 zone 配置，
+    否则项目用 admin001 账号建了目录，但操作却用 trae 单例 → 401 Unauthorized。
+    """
+    from app.models import Project, StorageZone
+    try:
+        pid = int(project_id) if project_id else None
+    except Exception:
+        pid = None
+
+    if pid:
+        try:
+            proj = db.query(Project).filter(Project.id == pid).first()
+            if proj and proj.storage_zone_id:
+                zone = db.query(StorageZone).filter(StorageZone.id == proj.storage_zone_id).first()
+                if zone:
+                    return FileStorageConfig(
+                        id=9999 + (zone.id or 0),
+                        mode=zone.mode or StorageMode.webdav,
+                        webdav_url=zone.webdav_url,
+                        webdav_port=zone.webdav_port,
+                        webdav_username=zone.webdav_username,
+                        webdav_password=zone.webdav_password,
+                        webdav_base_path=zone.webdav_base_path,
+                        webdav_use_ssl=zone.webdav_use_ssl if zone.webdav_use_ssl is not None else True,
+                        local_path=zone.local_path,
+                        template='{responsible_sales}+{project_name}+{date}',
+                    )
+        except Exception as e:
+            logger.exception(f"_resolve_config_for_project 反查失败: {e}")
+    return _ensure_config(db)
 
 def _resolve_target_dir_self_healing(
     db: Session,
@@ -77,13 +111,11 @@ def _resolve_target_dir_self_healing(
                     owner_username = owner.username or ''
                     owner_real_name = owner.real_name or ''
             if not owner_username:
-                # 最后兜底：当前 user 拼不出合理路径，留空
                 return '', project_name, 'missing'
-            cfg = _ensure_config(db)
+            cfg = _resolve_config_for_project(db, project_id)
             root = render_project_root(cfg, owner_username, owner_real_name, project_name)
             rebuilt = render_subfolder(root, sub_label)
             if rebuilt:
-                # 回写到数据库
                 try:
                     if folder_type == 'tender':
                         proj.tender_folder = rebuilt
@@ -104,7 +136,6 @@ def _resolve_target_dir_self_healing(
         logger.exception(f"_resolve_target_dir_self_healing 出错: {e}")
         return '', '', 'missing'
 
-
 @router.get('/config', response_model=FileStorageConfigResponse)
 def get_config(
     db: Session = Depends(get_db),
@@ -116,7 +147,6 @@ def get_config(
     if cfg.webdav_password:
         resp.webdav_password = '******'
     return resp
-
 
 @router.put('/config', response_model=FileStorageConfigResponse)
 def update_config(
@@ -151,7 +181,6 @@ def update_config(
         resp.webdav_password = '******'
     return resp
 
-
 @router.post('/test-connection', response_model=MessageResponse)
 def test_storage_connection(
     db: Session = Depends(get_db),
@@ -162,23 +191,17 @@ def test_storage_connection(
     ok, msg = test_connection(cfg)
     return MessageResponse(message=('✓ ' if ok else '✗ ') + msg)
 
-
 @router.post('/preview-path', response_model=PathPreviewResponse)
 def preview_path(
     data: PathPreviewRequest,
     db: Session = Depends(get_db),
     _user=Depends(get_current_user),
 ):
-    """预览项目路径（不实际建）
-    若前端传入 creator_username/creator_real_name（编辑模式下使用真实创建者），则用之；否则用当前用户
-    自建项目（source=self）按 storage_zone_id 找 StorageZone，否则用 FileStorageConfig
-    """
+    """预览项目路径（不实际建）"""
     from app.models import Project, User, StorageZone
-    from datetime import datetime as _dt
 
     username = data.creator_username or _user.username
     real_name = data.creator_real_name or _user.real_name
-    # 如果前端没传 creator_*，则从数据库反查真实创建者
     if not data.creator_username or not data.creator_real_name:
         try:
             proj = db.query(Project).filter(Project.project_name == data.project_name).first()
@@ -190,18 +213,39 @@ def preview_path(
         except Exception:
             pass
 
-    # 决定使用的配置对象
-    cfg_obj = None  # FileStorageConfig 兼容对象
-    if data.source == 'self' or data.storage_zone_id:
-        # 自建项目：按 storage_zone_id 找 zone
+    cfg_obj = None
+    # 任何 source 都可能要走 zone 解析：
+    #   - source='self' 且 storage_zone_id：直接用 zone
+    #   - source='self' 但没传 zone：从已存在的 Project 反查
+    #   - source='channel'：从「渠道项目登记表」FormTemplate 反查 zone（如果模板绑定了）
+    #   - 兜底：老单例 FileStorageConfig.id == 1
+    need_resolve_zone = (
+        data.source == 'self'
+        or data.storage_zone_id
+        or data.source == 'channel'  # ★ 新增：渠道项目也要走 zone 解析
+    )
+    if need_resolve_zone:
         zid = data.storage_zone_id
-        if not zid:
-            # 兜底：从 project 反查
+        if not zid and data.source == 'self':
+            # 自营项目：从已存在 Project 反查
             try:
                 proj = db.query(Project).filter(Project.project_name == data.project_name).first()
                 zid = proj.storage_zone_id if proj else None
             except Exception:
                 zid = None
+        if not zid and data.source == 'channel':
+            # ★ 渠道项目：从「渠道项目登记表」FormTemplate 反查 zone
+            try:
+                from app.models import FormTemplate
+                tpl = db.query(FormTemplate).filter(
+                    FormTemplate.name.like('%渠道项目%'),
+                    FormTemplate.is_active == True,
+                ).first()
+                if tpl and tpl.storage_zone_id:
+                    zid = tpl.storage_zone_id
+                    logger.info(f"[preview-path] 渠道项目用模板「{tpl.name}」的 storage_zone_id={zid}")
+            except Exception as e:
+                logger.warning(f"[preview-path] 反查渠道项目模板 zone 失败: {e}")
         zone = db.query(StorageZone).filter(StorageZone.id == zid).first() if zid else None
         if zone:
             cfg_obj = FileStorageConfig(
@@ -229,20 +273,14 @@ def preview_path(
         bid_folder=bid,
     )
 
-
-# === 上传端点 ===
+# === 列表 / 上传 / 删除 ===
 @router.post('/list-files')
 async def list_files(
     request: Request,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """列出指定子目录下的已上传文件（前端用 JSON POST 调用）
-
-    优先用 project_id 查 Project 表里的 tender_folder/bid_folder（数据库真实存盘路径）。
-    若没有 project_id，回退到 project_name + creator_username 模式（兼容旧调用）。
-    若 DB 字段为空，会自修复：按 creator + project_name 重建并回写。
-    """
+    """列出指定子目录下的已上传文件"""
     try:
         body = await request.json()
     except Exception as e:
@@ -258,40 +296,33 @@ async def list_files(
     sub_label = '招标资料' if folder_type == 'tender' else '投标文档'
     project_id = body.get('project_id')
     project_name_hint = body.get('project_name') or ''
-    db_source = ''  # 'db' | 'recovered' | 'fallback'
+    db_source = ''
 
-    # 1. 优先用 project_id 走自修复解析
     target_dir = ''
     if project_id:
         target_dir, project_name_hint, db_source = _resolve_target_dir_self_healing(
             db, project_id, folder_type, sub_label
         )
-        if project_name_hint and not body.get('project_name'):
-            project_name_hint = project_name_hint
 
-    # 2. 兼容旧调用：target_dir 字段
     if not target_dir:
         target_dir = (body.get('target_dir') or '').strip()
         if target_dir:
             db_source = 'client'
 
-    # 3. 都没拿到：按 creator + name 拼（不写回 DB）
     if not target_dir and project_name_hint:
         creator_username = body.get('creator_username') or current_user.username
         creator_real_name = body.get('creator_real_name') or current_user.real_name
-        cfg = _ensure_config(db)
+        cfg = _resolve_config_for_project(db, project_id)
         root = render_project_root(cfg, creator_username, creator_real_name, project_name_hint)
         target_dir = render_subfolder(root, sub_label)
         db_source = 'fallback'
 
-    # 详细日志（必打的诊断信息）
     logger.info(
         f"[list-files] project_id={project_id} folder_type={folder_type} "
         f"db_source={db_source} project_name={project_name_hint!r} target_dir={target_dir!r}"
     )
 
     if not target_dir:
-        logger.warning(f"[list-files] 无法解析 target_dir → 返回空 files: project_id={project_id}")
         return {
             'folder': '',
             'folder_type': folder_type,
@@ -299,12 +330,10 @@ async def list_files(
             'db_source': db_source,
         }
 
-    cfg = _ensure_config(db)
+    cfg = _resolve_config_for_project(db, project_id)
     files = []
     if cfg.mode == StorageMode.local:
         if not os.path.isdir(target_dir):
-            logger.warning(f"[list-files] 目录不存在: {target_dir}")
-            # 不抛错，返回空列表（前端可以提示）
             return {
                 'folder': target_dir,
                 'folder_type': folder_type,
@@ -329,7 +358,6 @@ async def list_files(
             logger.exception(f"[list-files] 读取目录失败: {target_dir}: {e}")
             raise HTTPException(500, detail=f'读取目录失败: {e}')
     else:
-        # WebDAV 模式：通过 PROPFIND 列出文件
         try:
             from app.services.webdav_client import list_files_webdav
             ok, file_list = list_files_webdav(cfg, target_dir, project_name_hint=project_name_hint)
@@ -339,7 +367,6 @@ async def list_files(
                 logger.warning(f"[list-files] WebDAV list 失败: target_dir={target_dir}")
         except Exception as e:
             logger.exception(f"[list-files] WebDAV 列出文件异常: {e}")
-            # 不吞，向上抛（前端能看到错误）
             raise HTTPException(500, detail=f'WebDAV 列出文件失败: {e}')
 
     logger.info(
@@ -352,12 +379,10 @@ async def list_files(
         'db_source': db_source,
     }
 
-
 class DeleteFileRequest(BaseModel):
     project_id: Optional[int] = None
-    folder_type: Optional[str] = None  # 'tender' / 'bid'
-    file_name: Optional[str] = None    # 文件名（不含路径）
-
+    folder_type: Optional[str] = None
+    file_name: Optional[str] = None
 
 @router.post('/delete-file', response_model=MessageResponse)
 async def delete_storage_file(
@@ -365,13 +390,7 @@ async def delete_storage_file(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """删除指定文件（仅系统管理员可用）
-
-    body: { project_id, folder_type, file_name }
-    - 优先用 project_id 查 Project 表里真实的 tender_folder/bid_folder
-    - 路径必须严格在项目目录内（防越权）
-    """
-    # ★ 权限：仅 admin
+    """删除指定文件（仅系统管理员）"""
     if not current_user or current_user.role.value != 'admin':
         raise HTTPException(status_code=403, detail='仅系统管理员可删除文件')
 
@@ -384,26 +403,22 @@ async def delete_storage_file(
 
     sub_label = '招标资料' if data.folder_type == 'tender' else '投标文档'
     file_name = data.file_name.strip()
-    # 防御：file_name 不允许路径分隔符 / .. 等
     if '/' in file_name or '\\' in file_name or '..' in file_name:
         raise HTTPException(400, detail=f'非法的 file_name: {file_name!r}')
 
-    # 解析真实目录（自修复 + 防御）
     target_dir, project_name, db_source = _resolve_target_dir_self_healing(
         db, data.project_id, data.folder_type, sub_label
     )
     if not target_dir:
         raise HTTPException(404, detail=f'无法解析项目 {data.project_id} 的目录')
 
-    # 拼接完整路径
     full_path = os.path.join(target_dir, file_name)
-    # ★ 越权防御：full_path 必须在 target_dir 之内
     target_abs = os.path.abspath(target_dir)
     full_abs = os.path.abspath(full_path)
     if not (full_abs == target_abs or full_abs.startswith(target_abs + os.sep)):
         raise HTTPException(400, detail='路径越权')
 
-    cfg = _ensure_config(db)
+    cfg = _resolve_config_for_project(db, data.project_id)
     deleted = False
     try:
         if cfg.mode == StorageMode.local:
@@ -413,10 +428,8 @@ async def delete_storage_file(
             else:
                 raise HTTPException(404, detail=f'文件不存在: {full_abs}')
         else:
-            # WebDAV：DELETE
             try:
                 from app.services.webdav_client import delete_file_webdav
-                # webdav target url 需要是 http(s)://...
                 if not target_dir.startswith('http'):
                     raise HTTPException(500, detail='WebDAV 模式下 target_dir 必须是 http(s) URL')
                 target_url = target_dir.rstrip('/') + '/' + file_name
@@ -439,7 +452,6 @@ async def delete_storage_file(
     if not deleted:
         raise HTTPException(500, detail='删除失败（未知原因）')
 
-    # 审计
     try:
         from app.models import Project
         proj = db.query(Project).filter(Project.id == data.project_id).first()
@@ -459,37 +471,28 @@ async def delete_storage_file(
                 f"folder_type={data.folder_type} file_name={file_name!r} db_source={db_source}")
     return MessageResponse(message=f'✓ 已删除 {file_name}')
 
-
 @router.post('/upload')
 async def upload_files(
-    folder_type: str = Form(..., description="tender=招标资料 / bid=投标文档"),
+    folder_type: str = Form(...),
     project_name: str = Form(..., min_length=1),
     files: List[UploadFile] = File(...),
     creator_username: str = Form(default=''),
     creator_real_name: str = Form(default=''),
     target_dir: str = Form(default=''),
-    overwrite: str = Form(default='false', description="true=允许覆盖同名文件"),
-    project_id: str = Form(default='', description="项目 ID（用于后端查真实存盘 folder）"),
+    overwrite: str = Form(default='false'),
+    project_id: str = Form(default=''),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """拖拽上传文件到当前项目目录的指定子目录（招标资料/投标文档）
-    - 所有登录用户可用
-    - 支持传入 creator_username/creator_real_name（其他用户为已有项目补充资料）
-    - 支持 project_id：后端用其查 tender_folder/bid_folder，作为真实存盘路径
-    - overwrite=true 时覆盖同名文件；默认按"加序号"避免覆盖
-    - local 模式：直接写到磁盘
-    - WebDAV 模式：PUT 到远程
-    """
+    """拖拽上传文件到当前项目目录的指定子目录"""
     if folder_type not in ('tender', 'bid'):
         raise HTTPException(400, detail=f'folder_type 必须是 tender 或 bid，收到: {folder_type}')
     if not files or len(files) == 0:
         raise HTTPException(400, detail='未选择文件')
 
     sub_label = '招标资料' if folder_type == 'tender' else '投标文档'
-    cfg = _ensure_config(db)
+    cfg = _resolve_config_for_project(db, project_id)
 
-    # 1. 优先用 project_id 查数据库里真实存的 folder
     db_target_dir = ''
     if project_id:
         try:
@@ -505,7 +508,6 @@ async def upload_files(
     rendered_root = render_project_root(cfg, user_for_path, real_name_for_path, project_name)
     rendered_dir = render_subfolder(rendered_root, sub_label)
 
-    # 优先级：db_target_dir > 前端传入 > 拼装
     target_dir = db_target_dir or (target_dir or '').strip() or rendered_dir
     overwrite_flag = str(overwrite).lower() in ('1', 'true', 'yes')
 
@@ -526,8 +528,6 @@ async def upload_files(
             if cfg.mode == StorageMode.local:
                 os.makedirs(target_dir, exist_ok=True)
                 full_path = os.path.join(target_dir, final_name)
-                # overwrite=true 且文件已存在：直接覆盖（删旧写新）
-                # overwrite=false 且文件已存在：加 _N 后缀
                 if os.path.exists(full_path):
                     if overwrite_flag:
                         try:
@@ -557,15 +557,13 @@ async def upload_files(
                     failed.append({'name': final_name, 'error': f'{type(_e).__name__}: {_e} | dir w={os.access(target_dir, os.W_OK)} | exists={os.path.exists(full_path)} | cwd={os.getcwd()} | tb={_tb.format_exc()[:500]}'})
                     raise
             else:
-                # WebDAV 模式
                 try:
                     from app.services.webdav_client import upload_file, delete_file_webdav, list_files_webdav
                     webdav_target = target_dir if target_dir.startswith('http') else render_subfolder(rendered_root, sub_label)
                     target_url = webdav_target.rstrip('/') + '/' + final_name
                     if not target_url.startswith('http'):
-                        target_url = 'http://invalid' + target_url  # 防御
+                        target_url = 'http://invalid' + target_url
                     overwritten = False
-                    # overwrite=true 且远程已有同名文件：先删后传
                     if overwrite_flag:
                         ok_list, existing = list_files_webdav(cfg, webdav_target, project_name_hint=project_name)
                         if ok_list and any(x.get('name') == final_name for x in existing):
@@ -591,7 +589,6 @@ async def upload_files(
         finally:
             await f.close()
 
-    # 审计：只记录成功的上传
     if uploaded:
         try:
             write_audit(
@@ -606,8 +603,6 @@ async def upload_files(
         except Exception as e:
             logger.exception(f"[upload] 写审计失败: {e}")
 
-    # ★关键：上传完成后回写 Project.tender_folder / bid_folder
-    # 这样下次 list-files 时直接用 DB 里的真实路径，不会因为模板/创建者变化而错位
     if project_id and uploaded:
         try:
             from app.models import Project
@@ -641,3 +636,151 @@ async def upload_files(
         'failed': failed,
         'total': len(files),
     }
+
+# === D1：诊断所有项目的存储路径（不修改 DB）===
+@router.post('/diagnose-all')
+def diagnose_all(
+    db: Session = Depends(get_db),
+    _user=Depends(get_current_user),
+):
+    """扫描所有项目的 tender_folder / bid_folder，PROPFIND 校验但不修改 DB。
+
+    返回每个项目的状态：
+      - ok      : 目录可访问
+      - wrong   : 目录不可访问（401/404/网络错误等）
+      - empty   : DB 字段为空
+      - unknown : 项目无关联 zone（无法判断）
+    """
+    from app.models import Project, StorageZone
+
+    items = []
+    summary = {"total": 0, "ok": 0, "wrong": 0, "empty": 0, "unknown": 0}
+
+    projs = db.query(Project).all()
+    for proj in projs:
+        item = {
+            "project_id": proj.id,
+            "project_name": proj.project_name,
+            "tender_folder": proj.tender_folder or "",
+            "bid_folder": proj.bid_folder or "",
+            "storage_zone_id": proj.storage_zone_id,
+            "tender_status": "unknown",
+            "tender_msg": "",
+            "bid_status": "unknown",
+            "bid_msg": "",
+        }
+
+        if proj.storage_zone_id is None:
+            item["tender_status"] = "unknown"
+            item["bid_status"] = "unknown"
+            item["tender_msg"] = "项目未关联 storage_zone"
+            item["bid_msg"] = "项目未关联 storage_zone"
+            summary["unknown"] += 1
+            items.append(item)
+            continue
+
+        cfg = _resolve_config_for_project(db, proj.id)
+
+        for folder_type, key in (("tender", "tender_folder"), ("bid", "bid_folder")):
+            url = getattr(proj, key) or ""
+            status_key = f"{folder_type}_status"
+            msg_key = f"{folder_type}_msg"
+            if not url:
+                item[status_key] = "empty"
+                item[msg_key] = "DB 字段为空"
+                continue
+            if cfg.mode == StorageMode.local:
+                if os.path.isdir(url):
+                    item[status_key] = "ok"
+                    item[msg_key] = "本地目录可访问"
+                    summary["ok"] += 1
+                else:
+                    item[status_key] = "wrong"
+                    item[msg_key] = f"本地目录不存在: {url}"
+                    summary["wrong"] += 1
+            else:
+                # WebDAV：PROPFIND 探测（用 probe_dir_exists 真实探测）
+                try:
+                    from app.services.webdav_client import probe_dir_exists
+                    if probe_dir_exists(cfg, url, timeout=4):
+                        item[status_key] = "ok"
+                        item[msg_key] = "WebDAV 目录可访问"
+                        summary["ok"] += 1
+                    else:
+                        item[status_key] = "wrong"
+                        item[msg_key] = f"PROPFIND 探测失败: {url}"
+                        summary["wrong"] += 1
+                except Exception as e:
+                    item[status_key] = "wrong"
+                    item[msg_key] = f"探测异常: {e}"
+                    summary["wrong"] += 1
+
+        items.append(item)
+
+    summary["total"] = len(projs)
+    return {"items": items, "summary": summary}
+
+# === D2：重建指定项目的 WebDAV 目录（仅管理员）===
+class RebuildFoldersRequest(BaseModel):
+    project_id: int
+
+@router.post('/rebuild-project-folders', response_model=MessageResponse)
+async def rebuild_project_folders(
+    data: RebuildFoldersRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """按项目当前 DB 字段（不重算）调 ensure_webdav_folders 重建子目录。
+
+    仅 admin。不会修改 tender_folder / bid_folder 字段。
+    """
+    if not current_user or current_user.role.value != 'admin':
+        raise HTTPException(status_code=403, detail='仅系统管理员可重建目录')
+
+    from app.models import Project
+    proj = db.query(Project).filter(Project.id == data.project_id).first()
+    if not proj:
+        raise HTTPException(404, detail=f'项目不存在: {data.project_id}')
+
+    cfg = _resolve_config_for_project(db, data.project_id)
+    if cfg.mode == StorageMode.local:
+        # 本地模式：直接 makedirs
+        try:
+            for url in (proj.tender_folder, proj.bid_folder):
+                if url:
+                    os.makedirs(url, exist_ok=True)
+            return MessageResponse(message='✓ 本地目录已就绪')
+        except Exception as e:
+            logger.exception(f'rebuild-project-folders 本地失败: {e}')
+            raise HTTPException(500, detail=f'本地重建失败: {e}')
+
+    # WebDAV 模式：对每个非空 folder 做 MKCOL（含"招标资料"/"投标文档"两个子目录）
+    from app.services.webdav_client import probe_dir_exists, _request
+    msgs = []
+    try:
+        # proj.tender_folder 形如 https://nas/dav/项目根/招标资料 → 实际是叶子目录
+        # 这里直接对叶子目录做 MKCOL（已存在会得到 405 Method Not Allowed，按成功跳过）
+        for root_url, sub in ((proj.tender_folder or '', '招标资料'), (proj.bid_folder or '', '投标文档')):
+            if not root_url:
+                msgs.append(f'{sub}: DB 为空，跳过')
+                continue
+            # 先探测是否已存在
+            if probe_dir_exists(cfg, root_url, timeout=4):
+                msgs.append(f'{sub}({root_url}): 已存在')
+                continue
+            # 不存在则 MKCOL
+            try:
+                resp = _request('MKCOL', root_url, cfg, timeout=15)
+                code = resp.status_code
+                if code in (201, 405):  # 201 Created / 405 已存在
+                    msgs.append(f'{sub}({root_url}): 新建成功' if code == 201 else f'{sub}({root_url}): 已存在(405)')
+                else:
+                    raise RuntimeError(f'{sub} MKCOL 返回 {code}')
+            except Exception as e:
+                raise RuntimeError(f'{sub} 创建失败: {e}')
+        return MessageResponse(message='✓ 重建完成: ' + '; '.join(msgs))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f'rebuild-project-folders 失败: {e}')
+        raise HTTPException(500, detail=f'重建失败: {e}')

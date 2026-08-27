@@ -112,7 +112,7 @@ python -m venv .venv
 pip install -r requirements.txt
 
 # 启动服务
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8765 --reload
 ```
 
 ### 3. 前端启动
@@ -127,7 +127,7 @@ npm run build                   # 生产构建（输出到 backend/static/）
 
 ### 4. 访问
 
-打开 http://localhost:8000/admin/
+打开 http://localhost:8765/admin/
 
 - 首次启动自动创建默认管理员账号：`admin` / `Admin@2026`（**请立即修改密码！**）
 - 也可通过 `DEFAULT_ADMIN_PASSWORD` 环境变量预置自定义初始密码：
@@ -162,12 +162,46 @@ upload:
 
 app:
   host: "0.0.0.0"
-  port: 8000
+  port: 8765
   debug: true
   cors_origins:
     - "http://localhost:5173"
     - "http://127.0.0.1:5173"
 ```
+
+---
+
+## 🤖 Agent 使用说明
+
+AI Agent 会基于项目资料、表单内容和跟单记录建立本地向量索引，再结合已配置的 AI 模型输出结构化分析结果。
+
+建议先准备这些环境变量：
+
+```bash
+set CHROMA_DIR=Y:\soft-RED\hermes\开发软件\渠道项目登记\backend\chroma_store
+set OPENAI_API_KEY=your_api_key_here
+set AGENT_EMBEDDING_PROVIDER=auto
+```
+
+常用命令：
+
+```bash
+cd backend
+python -m app.services.agent_indexer --build 123
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8765 --reload
+pytest -q tests/test_agent.py
+```
+
+接口说明：
+
+- `POST /api/agents/analyze`：返回项目可靠性评分、销售积极性评分、关键发现、建议和证据片段
+- `POST /api/agents/query`：围绕单个项目做问答，返回自然语言回答和引用来源
+
+说明：
+
+- 若数据库里没有启用的 AI 模型配置，接口会返回 4xx 提示
+- 若未设置 `OPENAI_API_KEY` 且当前模型也没有 `api_key`，LLM 调用会失败
+- 向量索引默认落在 `CHROMA_DIR`，建议在部署环境中持久化该目录
 
 ---
 

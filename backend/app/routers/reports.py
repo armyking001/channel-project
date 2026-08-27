@@ -6,6 +6,7 @@
 权限：与项目同 (normal 仅自己, important 自己+下属, admin 全部)
 """
 import io
+import logging
 from datetime import date, datetime
 from typing import Optional
 
@@ -24,6 +25,7 @@ from app.schemas import (
 )
 
 router = APIRouter(prefix="/api/reports", tags=["报表管理"])
+log = logging.getLogger("reports")
 
 WIN_BID_LABEL = {"yes": "中标", "no": "未中标", "in_progress": "进行中"}
 STATUS_LABEL = {"pending_submit": "待提交", "pending_approval": "待审批", "approved": "已通过", "rejected": "已驳回"}
@@ -160,7 +162,7 @@ def _resolve_model_info(db: Session, model_id: Optional[int]):
         "provider": model.provider,
         "base_url": model.base_url,
         "model_name": model.model_name,
-        "api_key": None,
+        "api_key": model.api_key,  # 服务端调用需要真 api_key；不要返回给前端
         "temperature": model.temperature,
         "max_tokens": model.max_tokens,
         "timeout_seconds": model.timeout_seconds,
@@ -173,6 +175,36 @@ def _resolve_model_info(db: Session, model_id: Optional[int]):
         "creator": model.creator,
     }
     return model, model_info
+
+
+# 系统提示词：优先用调用方传入，否则取数据库中 role_key='default' 且启用的那条
+DEFAULT_SYSTEM_PROMPT = (
+    "你是小销，销售项目数据智能助理。"
+    "回答要简洁、可执行；遇到不确定的数据，请提示用户。"
+)
+
+
+def _resolve_system_prompt(db: Session, system_prompt: Optional[str]) -> tuple[str, str]:
+    """返回 (system_prompt 文本, 显示用的角色名称)"""
+    text = (system_prompt or "").strip()
+    if text:
+        # 推断角色名：取首行关键词
+        first_line = text.splitlines()[0].strip().strip('"').strip('「').strip('」')
+        role_label = first_line[:24] if first_line else "AI 助理"
+        return text, role_label
+    # fallback 到 DB
+    try:
+        from app.models import AgentPrompt
+        row = (db.query(AgentPrompt)
+               .filter(AgentPrompt.role_key == 'default', AgentPrompt.enabled == True)
+               .order_by(AgentPrompt.id.desc()).first())
+        if row and row.content:
+            first_line = row.content.splitlines()[0].strip().strip('"').strip('「').strip('」')
+            role_label = first_line[:24] if first_line else (row.name or "AI 助理")
+            return row.content, role_label
+    except Exception:
+        pass
+    return DEFAULT_SYSTEM_PROMPT, "小销"
 
 
 def _build_report_snapshot(rows: list[Project]):
@@ -225,26 +257,99 @@ def _build_report_snapshot(rows: list[Project]):
     }
 
 
-def _answer_as_xiaoxiao(question: str, snapshot: dict):
+def _call_llm(model_info: dict, system_prompt: str, user_prompt: str, history: list | None = None) -> str:
+    """调用 OpenAI 兼容接口的大模型，支持本地（Ollama/vLLM/LM Studio）和云端（Kimi/MiniMax/DeepSeek）。
+    返回模型回复的纯文本。任何异常都会被上层 try/except 兜住，并 fallback 到骨架回答。
+    """
+    try:
+        from openai import OpenAI  # 延迟导入，未装包时降级走骨架
+    except Exception:
+        log.warning("openai 包未安装，无法调用大模型；返回 None 让上层 fallback")
+        return None
+    if not model_info:
+        return None
+    api_key = (model_info.get('api_key') or '').strip() or 'sk-no-key'
+    base_url = (model_info.get('base_url') or '').strip() or None
+    model_name = model_info.get('model_name') or ''
+    if not model_name:
+        return None
+    timeout = int(model_info.get('timeout_seconds') or 60)
+    temperature = float(model_info.get('temperature') or 0.2)
+    max_tokens = model_info.get('max_tokens')
+
+    # OpenAI Python SDK 不会自动拼 /v1，必须把 base_url 归一为带 /v1 的根路径
+    sdk_base_url = base_url.rstrip('/') if base_url else None
+    if sdk_base_url:
+        if sdk_base_url.endswith('/chat/completions'):
+            sdk_base_url = sdk_base_url[: -len('/chat/completions')].rstrip('/')
+        if not sdk_base_url.endswith('/v1'):
+            sdk_base_url = sdk_base_url + '/v1'
+
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    # 历史对话（最近 6 条，避免 token 爆炸）
+    for msg in (history or [])[-6:]:
+        role = msg.get('role')
+        content = (msg.get('content') or '').strip()
+        if not content or role not in ('user', 'assistant'):
+            continue
+        messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": user_prompt})
+
+    try:
+        client_kwargs = {"api_key": api_key, "timeout": timeout}
+        if sdk_base_url:
+            client_kwargs["base_url"] = sdk_base_url
+        client = OpenAI(**client_kwargs)
+        kwargs = {
+            "model": model_name,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": False,
+        }
+        if max_tokens:
+            kwargs["max_tokens"] = int(max_tokens)
+        log.info("LLM CALL -> base_url=%s (raw=%s) model=%s timeout=%s messages=%d", sdk_base_url, base_url, model_name, timeout, len(messages))
+        resp = client.chat.completions.create(**kwargs)
+        # 兼容字符串/对象两种返回
+        if hasattr(resp, 'choices') and resp.choices:
+            msg = resp.choices[0].message
+            content = (msg.content or '') if hasattr(msg, 'content') else (msg.get('content') if isinstance(msg, dict) else '')
+            content = (content or '').strip()
+            log.info("LLM RESP <- choices=%d content_len=%d", len(resp.choices), len(content))
+            return content or None
+        log.warning("LLM RESP <- no choices, raw_type=%s raw_preview=%r",
+                    type(resp).__name__,
+                    str(resp)[:200] if not hasattr(resp, 'choices') else None)
+        return None
+    except Exception as e:
+        import traceback
+        log.warning("LLM 调用失败: %s\n%s", e, traceback.format_exc())
+        return None
+
+
+def _answer_as_xiaoxiao(question: str, snapshot: dict, role_label: str = "小销"):
     q = (question or "").strip()
     if not q:
         return snapshot["summary_text"]
+    role_prefix = f"我是{role_label}。"
     if "中标" in q:
-        return f"小销看了一下，当前范围内中标项目 {snapshot['win_count']} 个，中标率约 {round((snapshot['win_count'] / snapshot['total_rows'] * 100), 1) if snapshot['total_rows'] else 0}% 。如果你愿意，我下一步可以继续按项目类型或责任销售拆开看。"
+        return f"{role_prefix}当前范围内中标项目 {snapshot['win_count']} 个，中标率约 {round((snapshot['win_count'] / snapshot['total_rows'] * 100), 1) if snapshot['total_rows'] else 0}% 。如果你愿意，我下一步可以继续按项目类型或责任销售拆开看。"
     if "自营" in q or "渠道" in q:
-        return f"当前自营项目 {snapshot['self_count']} 个，渠道项目 {snapshot['channel_count']} 个。整体上 {'自营项目更多' if snapshot['self_count'] > snapshot['channel_count'] else '渠道项目更多' if snapshot['channel_count'] > snapshot['self_count'] else '两类项目数量接近'}。"
+        return f"{role_prefix}当前自营项目 {snapshot['self_count']} 个，渠道项目 {snapshot['channel_count']} 个。整体上 {'自营项目更多' if snapshot['self_count'] > snapshot['channel_count'] else '渠道项目更多' if snapshot['channel_count'] > snapshot['self_count'] else '两类项目数量接近'}。"
     if "合作" in q or "公司" in q or "客户" in q:
         top_partner = max(snapshot["partner_counter"].items(), key=lambda x: x[1])[0] if snapshot["partner_counter"] else "暂无"
-        return f"从合作公司分布看，当前最集中的合作公司是“{top_partner}”。如果你要，我可以继续按合作公司给你做一个 Top 排名说明。"
+        return f"{role_prefix}从合作公司分布看，当前最集中的合作公司是“{top_partner}”。如果你要，我可以继续按合作公司给你做一个 Top 排名说明。"
     if "销售" in q:
         top_sales = max(snapshot["sales_counter"].items(), key=lambda x: x[1])[0] if snapshot["sales_counter"] else "暂无"
-        return f"按责任销售看，当前项目数最多的是“{top_sales}”。如果你希望，我可以进一步说明不同责任销售负责的金额规模。"
+        return f"{role_prefix}按责任销售看，当前项目数最多的是“{top_sales}”。如果你希望，我可以进一步说明不同责任销售负责的金额规模。"
     if "阶段" in q or "跟单" in q:
         top_stage = max(snapshot["followup_counter"].items(), key=lambda x: x[1])[0] if snapshot["followup_counter"] else "暂无"
-        return f"跟单阶段里，目前最集中的阶段是“{top_stage}”。这通常意味着这批项目主要还停留在这个推进阶段。"
+        return f"{role_prefix}跟单阶段里，目前最集中的阶段是“{top_stage}”。这通常意味着这批项目主要还停留在这个推进阶段。"
     if "金额" in q or "多少" in q or "总额" in q:
-        return f"当前筛选范围的项目总金额是 {snapshot['total_amount']:,.2f}。如果你想更细一点，我可以继续按项目类型、责任销售或合作公司拆分金额。"
-    return f"我是小销，这次我先给你一个整体判断：{snapshot['summary_text']} 如果你继续追问某个方向，比如中标、金额、责任销售、合作公司或跟单阶段，我可以继续展开。"
+        return f"{role_prefix}当前筛选范围的项目总金额是 {snapshot['total_amount']:,.2f}。如果你想更细一点，我可以继续按项目类型、责任销售或合作公司拆分金额。"
+    return f"{role_prefix}{snapshot['summary_text']} 如果你继续追问某个方向，比如中标、金额、责任销售、合作公司或跟单阶段，我可以继续展开。"
 
 
 def _append_current_table_row(ws, project: Project):
@@ -581,14 +686,53 @@ def ai_analyze(
     _, model_info = _resolve_model_info(db, data.model_id)
     preview_rows = [_serialize_project_for_ai(item, selected_fields) for item in rows]
     snapshot = _build_report_snapshot(all_rows)
+    system_prompt_text, role_label = _resolve_system_prompt(db, data.system_prompt)
+
+    # 拼装给 LLM 用的 user prompt：业务上下文 + 用户要求
+    ctx_lines = [
+        f"## 当前数据范围",
+        f"- 共匹配 {snapshot['total_rows']} 个项目",
+        f"- 项目总金额: {snapshot['total_amount']:,.2f}",
+        f"- 中标: {snapshot['win_count']} / 已审批通过: {snapshot['approved_count']}",
+        f"- 自营: {snapshot['self_count']} / 渠道: {snapshot['channel_count']}",
+        f"- 摘要: {snapshot['summary_text']}",
+        "",
+        f"## 已选字段（用于左侧表格渲染）",
+        ", ".join(FIELD_LABELS.get(f, f) for f in selected_fields),
+        "",
+        f"## 预览样本（最多 20 条）",
+    ]
+    for i, item in enumerate(preview_rows, 1):
+        ctx_lines.append(f"  {i}. " + " | ".join(
+            f"{FIELD_LABELS.get(k, k)}={preview_rows[i-1][k]}" for k in selected_fields
+        ))
+    ctx_lines += ["", f"## 用户的要求", data.prompt or "请基于以上数据给出一句话总结。"]
+    user_prompt = "\n".join(ctx_lines)
+
+    # 真接 LLM；失败 fallback 到骨架答案
+    llm_answer = _call_llm(model_info, system_prompt_text, user_prompt)
+    if llm_answer:
+        final_answer = llm_answer
+        answer_mode = "llm"
+    else:
+        final_answer = _answer_as_xiaoxiao(data.prompt, snapshot, role_label)
+        answer_mode = "skeleton"
+    # 暴露给前端前脱敏 api_key
+    if model_info:
+        model_info["api_key"] = None
+
     return {
-        "mode": "skeleton",
-        "message": f"已按当前筛选条件完成数据预览，当前共匹配 {snapshot['total_rows']} 条数据。",
+        "mode": answer_mode,
+        "message": (
+            f"已按当前筛选条件完成数据预览，当前共匹配 {snapshot['total_rows']} 条数据。"
+            + ("（已由大模型生成摘要）" if answer_mode == "llm" else "（当前未连接大模型，使用骨架回答）")
+        ),
         "model": model_info,
         "agent": {
-            "name": "小销",
+            "name": role_label,
             "role": "智能助理",
             "abilities": ["数据摘要", "问答沟通", "趋势提醒"],
+            "system_prompt": system_prompt_text,
         },
         "filters": {
             "keyword": data.keyword,
@@ -607,12 +751,13 @@ def ai_analyze(
         "display_type": data.display_type,
         "total_rows": snapshot["total_rows"],
         "summary_text": snapshot["summary_text"],
-        "answer": _answer_as_xiaoxiao(data.prompt, snapshot),
+        "answer": final_answer,
         "preview_rows": preview_rows,
         "suggestions": [
             "当前导出 Excel 会导出当前筛选表格，全量导出会按渠道项目和自营项目拆成两个 sheet。",
             "表格预览已改为中文表头，和系统里的业务字段名称保持一致。",
-            "小销可以继续围绕中标、金额、责任销售、合作公司和跟单阶段做追问式分析。",
+            f"{role_label}已加载系统提示词，所有回复都将按该角色风格生成。",
+            "已根据用户要求把上下文 + 数据摘要发送给大模型，模型回复直接展示在 answer 中。",
         ],
     }
 
@@ -632,15 +777,43 @@ def ai_assistant(
     rows = q.all()
     _, model_info = _resolve_model_info(db, data.model_id)
     snapshot = _build_report_snapshot(rows)
+    system_prompt_text, role_label = _resolve_system_prompt(db, data.system_prompt)
+
+    # 把数据上下文 + 用户问题拼给 LLM
+    ctx_lines = [
+        f"## 当前数据范围（共 {snapshot['total_rows']} 个项目）",
+        f"- 项目总金额: {snapshot['total_amount']:,.2f}",
+        f"- 中标: {snapshot['win_count']} / 已审批通过: {snapshot['approved_count']}",
+        f"- 自营: {snapshot['self_count']} / 渠道: {snapshot['channel_count']}",
+        f"- 摘要: {snapshot['summary_text']}",
+        "",
+        f"## 用户的问题",
+        data.question,
+    ]
+    user_prompt = "\n".join(ctx_lines)
+
+    llm_answer = _call_llm(model_info, system_prompt_text, user_prompt, history=data.history)
+    if llm_answer:
+        final_answer = llm_answer
+        answer_mode = "llm"
+    else:
+        final_answer = _answer_as_xiaoxiao(data.question, snapshot, role_label)
+        answer_mode = "skeleton"
+    # 暴露给前端前脱敏 api_key
+    if model_info:
+        model_info["api_key"] = None
+
     return {
-        "assistant_name": "小销",
+        "assistant_name": role_label,
+        "mode": answer_mode,
         "model": model_info,
         "total_rows": snapshot["total_rows"],
         "summary_text": snapshot["summary_text"],
-        "answer": _answer_as_xiaoxiao(data.question, snapshot),
+        "answer": final_answer,
         "tips": [
-            "你可以继续问：哪类项目最多？",
+            "你可以继续问：哪类项目最多？" if answer_mode == "skeleton" else "模型已基于你的提问 + 当前数据范围直接作答。",
             "你可以继续问：责任销售的金额分布怎么样？",
             "你可以继续问：中标项目和未中标项目差异是什么？",
+            f"{role_label}已加载管理员配置的系统提示词，所有回答都按该角色风格生成。",
         ],
     }

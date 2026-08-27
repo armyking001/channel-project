@@ -383,6 +383,28 @@ class Notification(Base):
     receiver = relationship("User", foreign_keys=[receiver_id])
 
 
+class AgentPrompt(Base):
+    """AI Agent 系统提示词（管理员可维护多个角色模板）
+    - role_key: 角色键（业务分析专家/销售专家等）
+    - content: 完整系统提示词，每次请求都会作为 system message 注入
+    - enabled: 是否启用，启用且 role_key 与激活值匹配时自动作为默认
+    """
+    __tablename__ = "agent_prompts"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    name = Column(String(100), nullable=False)
+    role_key = Column(String(50), nullable=False, index=True)
+    content = Column(Text, nullable=False)
+    description = Column(String(500), nullable=True)
+    enabled = Column(Boolean, default=True, nullable=False)
+    created_by = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(),
+                        onupdate=func.now(), nullable=False)
+
+    creator = relationship('User', foreign_keys=[created_by], lazy='joined')
+
+
 class NotificationSetting(Base):
     """通知偏好 — 每用户每事件类型一组开关
     - in_app: 站内消息 + 铃铛 + 红点
@@ -427,7 +449,7 @@ class NotificationGlobalConfig(Base):
     __tablename__ = "notification_global_config"
 
     id = Column(Integer, primary_key=True, default=1)
-    title_prefix = Column(String(100), default='【销售项目管理系统V2.0通知】', nullable=False)
+    title_prefix = Column(String(100), default='【销售项目管理系统V2.1通知】', nullable=False)
     apply_in_app = Column(Boolean, default=False, nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

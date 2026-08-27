@@ -289,7 +289,7 @@ def update_global_cfg(
 ):
     row = get_global_config(db)
     if payload.title_prefix is not None:
-        row.title_prefix = (payload.title_prefix or '').strip() or '【销售项目管理系统V2.0通知】'
+        row.title_prefix = (payload.title_prefix or '').strip() or '【销售项目管理系统V2.1通知】'
     if payload.apply_in_app is not None:
         row.apply_in_app = payload.apply_in_app
     db.commit()

@@ -257,7 +257,6 @@ def list_files_webdav(config, folder_url: str, timeout: int = 15, project_name_h
                 resp2 = _request('PROPFIND', alt, config, timeout=timeout, extra_headers=headers)
                 if 200 <= resp2.status_code < 300:
                     return _parse_profind(resp2)
-            return False, []
         return _parse_profind(resp)
     except requests.exceptions.SSLError as e:
         return False, []
@@ -267,3 +266,28 @@ def list_files_webdav(config, folder_url: str, timeout: int = 15, project_name_h
         return False, []
     except Exception:
         return False, []
+
+
+def probe_dir_exists(config, dir_url: str, timeout: int = 4) -> bool:
+    """PROPFIND Depth:0 探测目录是否存在（不开文件列表，开销小）
+
+    用法：升级/迁移后，DB 里的 tender_folder/bid_folder 可能过时，
+    用本函数在 WebDAV 上探测多种候选命名，找到第一个存在的就当事实真目录。
+    """
+    if not dir_url or not dir_url.startswith('http'):
+        return False
+    try:
+        headers = {
+            'User-Agent': 'channel-project-storage/1.0',
+            'Depth': '0',
+        }
+        resp = _request('PROPFIND', dir_url, config, timeout=timeout, extra_headers=headers)
+        return 200 <= resp.status_code < 300
+    except requests.exceptions.SSLError:
+        return False
+    except requests.exceptions.ConnectTimeout:
+        return False
+    except requests.exceptions.ConnectionError:
+        return False
+    except Exception:
+        return False
