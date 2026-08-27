@@ -41,6 +41,11 @@ data/
 uploads/
 backups/
 
+# Pre-installed dependency snapshot (Python site-packages, 70MB+)
+# Use `python -m pip install -r backend/requirements.txt` on each machine instead.
+backend/site_pkg/
+backend/.venv_local_new_pkgs/
+
 # Frontend
 frontend/node_modules/
 frontend/dist/
