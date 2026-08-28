@@ -31,18 +31,18 @@ from app.services.audit import write_audit
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix='/api/file-storage', tags=['文件管理'])
 
-# 单文件最大 500MB（前端也应该做同样限制防止 DoS）
+# 单文件最大 1GB（前端也应该做同样限制防止 DoS）
 # 可在 config.yaml -> upload.max_file_size_mb 覆盖
-_MAX_FILE_SIZE_DEFAULT = 500 * 1024 * 1024  # 500MB
+_MAX_FILE_SIZE_DEFAULT = 1024 * 1024 * 1024  # 1GB
 _CHUNK_SIZE = 1024 * 1024  # 1MB 流式分块
 
 
 def _get_max_file_size(db: Session) -> int:
-    """从 config.yaml 读取 max_file_size_mb，未配置则用默认 500MB"""
+    """从 config.yaml 读取 max_file_size_mb，未配置则用默认 1024MB (1GB)"""
     try:
         from app.database import load_config
         cfg = load_config()
-        mb = int(cfg.get('upload', {}).get('max_file_size_mb', 500))
+        mb = int(cfg.get('upload', {}).get('max_file_size_mb', 1024))
         return mb * 1024 * 1024
     except Exception:
         return _MAX_FILE_SIZE_DEFAULT
