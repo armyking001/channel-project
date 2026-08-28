@@ -31,6 +31,54 @@ from app.services.audit import write_audit
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix='/api/file-storage', tags=['文件管理'])
 
+# 单文件最大 500MB（前端也应该做同样限制防止 DoS）
+# 可在 config.yaml -> upload.max_file_size_mb 覆盖
+_MAX_FILE_SIZE_DEFAULT = 500 * 1024 * 1024  # 500MB
+_CHUNK_SIZE = 1024 * 1024  # 1MB 流式分块
+
+
+def _get_max_file_size(db: Session) -> int:
+    """从 config.yaml 读取 max_file_size_mb，未配置则用默认 500MB"""
+    try:
+        from app.database import load_config
+        cfg = load_config()
+        mb = int(cfg.get('upload', {}).get('max_file_size_mb', 500))
+        return mb * 1024 * 1024
+    except Exception:
+        return _MAX_FILE_SIZE_DEFAULT
+
+
+def _read_upload_streaming(upload_file: UploadFile, max_size: int, on_progress=None):
+    """流式读取 UploadFile 到字节数组，超过 max_size 抛错
+    - 每次读 _CHUNK_SIZE 字节（1MB）
+    - 已读超过 max_size 立即中止抛 HTTPException(413)
+    - on_progress(bytes_read) 回调用于扩展（前端有 xhr.upload.onprogress 已经够用, 这里保留）
+    """
+    import asyncio
+    received = bytearray()
+    try:
+        while True:
+            chunk = upload_file.file.read(_CHUNK_SIZE)
+            if not chunk:
+                break
+            received.extend(chunk)
+            if on_progress:
+                try:
+                    on_progress(len(received))
+                except Exception:
+                    pass
+            if len(received) > max_size:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f'文件 {upload_file.filename!r} 超过单文件大小限制 '
+                           f'({max_size // 1024 // 1024}MB)，请压缩后分批上传',
+                )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f'读取上传流失败: {e}')
+    return bytes(received)
+
 def _ensure_config(db: Session) -> FileStorageConfig:
     cfg = db.query(FileStorageConfig).filter(FileStorageConfig.id == 1).first()
     if not cfg:
@@ -514,6 +562,7 @@ async def upload_files(
     uploaded = []
     failed = []
     timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+    max_size = _get_max_file_size(db)
 
     for f in files:
         original = f.filename or f'unknown_{timestamp}'
@@ -524,7 +573,8 @@ async def upload_files(
         counter = 1
 
         try:
-            content = await f.read()
+            # 流式分块读取（避免大文件占用过多内存 + 实时检查大小）
+            content = _read_upload_streaming(f, max_size)
             if cfg.mode == StorageMode.local:
                 os.makedirs(target_dir, exist_ok=True)
                 full_path = os.path.join(target_dir, final_name)

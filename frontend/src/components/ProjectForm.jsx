@@ -100,6 +100,8 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
   const [bidPreview, setBidPreview] = useState('')
   const [uploadingTender, setUploadingTender] = useState(false)
   const [uploadingBid, setUploadingBid] = useState(false)
+  // 上传进度状态: { tender: { percent, currentFile, done, total }, bid: {...} }
+  const [uploadProgress, setUploadProgress] = useState({ tender: null, bid: null })
 
   const [tenderFiles, setTenderFiles] = useState([])
   const [bidFiles, setBidFiles] = useState([])
@@ -321,41 +323,108 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
 
   const doUpload = async (folderType, files, overwrite = false) => {
     if (!files || files.length === 0) return
-    const fd = new FormData()
-    fd.append('folder_type', folderType)
-    fd.append('project_name', form.project_name || project.project_name)
-    fd.append('creator_username', creatorForPath?.username || currentUser?.username || '')
-    fd.append('creator_real_name', creatorForPath?.real_name || currentUser?.real_name || '')
-    if (project?.id) fd.append('project_id', String(project.id))
-    fd.append('overwrite', overwrite ? 'true' : 'false')
-    for (const f of files) fd.append('files', f)
     const setter = folderType === 'tender' ? setUploadingTender : setUploadingBid
     setter(true)
+    // 单文件 500MB 上限（与后端 _MAX_FILE_SIZE_DEFAULT 对齐）
+    const MAX_FILE_SIZE = 500 * 1024 * 1024
+    const oversized = files.filter(f => f.size > MAX_FILE_SIZE)
+    if (oversized.length) {
+      alert(`以下文件超过 500MB 单文件上限，请压缩后分批上传:\n${oversized.map(f => `• ${f.name} (${(f.size/1024/1024).toFixed(1)}MB)`).join('\n')}`)
+      setter(false)
+      return
+    }
+    // 分批:每批 ≤ 3 个,避免单次 form-data 体积过大触发 413
+    const BATCH_SIZE = 3
+    const batches = []
+    for (let i = 0; i < files.length; i += BATCH_SIZE) batches.push(files.slice(i, i + BATCH_SIZE))
+
+    const allUploaded = []
+    const allFailed = []
+    const totalFiles = files.length
+
     try {
-      const res = await fetch('/api/file-storage/upload', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
-        body: fd,
-      })
-      const data = await res.json()
-      if (!res.ok) {
-        alert('上传失败: ' + (data.detail || res.status))
-        return
+      for (let bi = 0; bi < batches.length; bi++) {
+        const batch = batches[bi]
+        const fd = new FormData()
+        fd.append('folder_type', folderType)
+        fd.append('project_name', form.project_name || project.project_name)
+        fd.append('creator_username', creatorForPath?.username || currentUser?.username || '')
+        fd.append('creator_real_name', creatorForPath?.real_name || currentUser?.real_name || '')
+        if (project?.id) fd.append('project_id', String(project.id))
+        fd.append('overwrite', overwrite ? 'true' : 'false')
+        for (const f of batch) fd.append('files', f)
+
+        const result = await new Promise((resolve) => {
+          const xhr = new XMLHttpRequest()
+          const batchStartIdx = bi * BATCH_SIZE
+          xhr.upload.onprogress = (e) => {
+            if (!e.lengthComputable) return
+            // 当前文件进度 = 当前 batch 内已传字节 / 当前 batch 总大小
+            const batchDoneBytes = e.loaded
+            const batchTotal = e.total
+            const batchPercent = Math.round((batchDoneBytes / batchTotal) * 100)
+            // 总体进度 = (已完成的批次文件数 + 当前批次百分比) / 总文件数
+            const overallPercent = Math.min(100, Math.round(
+              ((batchStartIdx + batchDoneBytes / batchTotal * batch.length) / totalFiles) * 100
+            ))
+            const currentFile = batch[batch.length - 1]?.name || ''
+            setUploadProgress(p => ({ ...p, [folderType]: {
+              percent: overallPercent,
+              currentFile,
+              batchPercent,
+              done: batchStartIdx + Math.ceil(batch.length * batchDoneBytes / batchTotal),
+              total: totalFiles,
+              batchIndex: bi + 1,
+              batchCount: batches.length,
+            }}))
+          }
+          xhr.onload = () => {
+            try {
+              const data = JSON.parse(xhr.responseText)
+              resolve({ ok: xhr.status >= 200 && xhr.status < 300, data, status: xhr.status })
+            } catch (_) {
+              resolve({ ok: false, data: { detail: xhr.responseText || `HTTP ${xhr.status}` }, status: xhr.status })
+            }
+          }
+          xhr.onerror = () => resolve({ ok: false, data: { detail: '网络错误' }, status: 0 })
+          xhr.onabort = () => resolve({ ok: false, data: { detail: '已取消' }, status: 0 })
+          xhr.open('POST', '/api/file-storage/upload')
+          xhr.setRequestHeader('Authorization', 'Bearer ' + (localStorage.getItem('token') || ''))
+          xhr.send(fd)
+        })
+
+        if (!result.ok) {
+          const detail = result.data?.detail || `HTTP ${result.status}`
+          alert(`第 ${bi+1}/${batches.length} 批上传失败: ${detail}`)
+          allFailed.push({ batch: bi + 1, error: detail })
+          // 413 时给出更友好提示
+          if (result.status === 413) {
+            alert('提示: 服务端拒绝了请求体过大(413)。\n可能原因:\n1) 单文件超过 500MB 上限\n2) Nginx / 反向代理 body 限制过小\n请检查系统部署的 client_max_body_size 配置。')
+          }
+          break
+        } else {
+          if (Array.isArray(result.data?.uploaded)) allUploaded.push(...result.data.uploaded)
+          if (Array.isArray(result.data?.failed)) allFailed.push(...result.data.failed)
+        }
       }
+
+      setUploadProgress(p => ({ ...p, [folderType]: null }))
       await fetchFiles(form.project_name || project.project_name, folderType, creatorForPath)
-      const okCount = data.uploaded?.length || 0
-      const failCount = data.failed?.length || 0
-      if (failCount === 0) {
+      const okCount = allUploaded.length
+      const failCount = allFailed.filter(f => !f.batch).length
+      if (allFailed.filter(f => f.batch).length === 0) {
         const tip = overwrite && okCount > 0 ? `成功覆盖 ${okCount} 个文件` : `成功上传 ${okCount} 个文件`
-        alert(tip)
-        // ★ 编辑状态修改后通知父组件刷新列表（保证查看状态打开时拿到最新数据）
-        //   只刷数据不关弹窗 → 用 onFilesUploaded；不要调 onSaved（会关弹窗）
+        if (failCount > 0) {
+          alert(`上传完成：成功 ${okCount}，失败 ${failCount}\n失败原因：${allFailed.filter(f => !f.batch).map(f => f.error || f.name).join('; ')}`)
+        } else if (okCount > 0) {
+          // 不弹 alert 避免打断,只在控制台输出
+          console.log(tip)
+        }
         if (okCount > 0) onFilesUploaded?.()
-      } else {
-        alert(`上传完成：成功 ${okCount}，失败 ${failCount}\n失败原因：${data.failed.map(f => f.error || f.name).join('; ')}`)
       }
     } catch (err) {
       alert('上传失败: ' + (err.message || '网络错误'))
+      setUploadProgress(p => ({ ...p, [folderType]: null }))
     } finally {
       setter(false)
     }
@@ -407,11 +476,34 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
         )}
         <div className="text-center text-sm text-gray-500">
           {uploading ? (
-            <span className="text-blue-600">⏳ 上传中...</span>
+            <div className="space-y-2">
+              <div className="text-blue-600 text-sm">
+                ⏳ 上传中... {uploadProgress[folderType]?.percent ?? 0}%
+              </div>
+              {uploadProgress[folderType] && (
+                <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+                  <div
+                    className="bg-blue-500 h-full transition-all duration-200"
+                    style={{ width: `${uploadProgress[folderType]?.percent ?? 0}%` }}
+                  />
+                </div>
+              )}
+              {uploadProgress[folderType]?.currentFile && (
+                <div className="text-[10px] text-gray-500 truncate" title={uploadProgress[folderType].currentFile}>
+                  {uploadProgress[folderType].currentFile}
+                </div>
+              )}
+              {uploadProgress[folderType]?.batchCount > 1 && (
+                <div className="text-[10px] text-gray-400">
+                  批次 {uploadProgress[folderType].batchIndex}/{uploadProgress[folderType].batchCount}
+                </div>
+              )}
+            </div>
           ) : (
             <div className="space-y-1">
               <div className="text-base">📎 拖拽文件到此处</div>
               <div className="text-xs text-gray-400">或 <span className="text-blue-600">点击选择文件</span></div>
+              <div className="text-[10px] text-gray-400">单文件最大 500MB，超大文件请压缩分批上传</div>
             </div>
           )}
         </div>

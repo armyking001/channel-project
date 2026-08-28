@@ -182,6 +182,38 @@ export const uploadFormFiles = (instanceId, folderType, files) => {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
 }
+// XMLHttpRequest 版本 — 支持上传进度回调(onUploadProgress)
+export const uploadFormFilesXhr = (instanceId, folderType, files, onProgress) => {
+  return new Promise((resolve, reject) => {
+    const fd = new FormData()
+    fd.append('instance_id', instanceId)
+    fd.append('folder_type', folderType)
+    files.forEach(f => fd.append('files', f))
+    const xhr = new XMLHttpRequest()
+    if (onProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100), e.loaded, e.total)
+      }
+    }
+    xhr.onload = () => {
+      try {
+        const data = JSON.parse(xhr.responseText)
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve({ data, status: xhr.status })
+        } else {
+          reject({ response: { data, status: xhr.status }, message: data.detail || `HTTP ${xhr.status}` })
+        }
+      } catch (_) {
+        reject({ message: `HTTP ${xhr.status}: ${xhr.responseText?.slice(0, 200)}` })
+      }
+    }
+    xhr.onerror = () => reject({ message: '网络错误' })
+    xhr.onabort = () => reject({ message: '已取消' })
+    xhr.open('POST', '/api/forms/file-storage/upload')
+    xhr.setRequestHeader('Authorization', 'Bearer ' + (localStorage.getItem('token') || ''))
+    xhr.send(fd)
+  })
+}
 export const deleteFormFile = (data) => api.post('/forms/file-storage/delete-file', data)
 
 export default api

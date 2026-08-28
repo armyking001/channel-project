@@ -57,6 +57,31 @@ sudo npm run build 2>&1 | tail -5
 ls /opt/channel-project/backend/static/
 echo "  DONE"
 
+# 6.5 检查并修复 Nginx client_max_body_size（大文件上传必需）
+echo "[6.5/7] 调整 Nginx body 限制..."
+NGINX_CONF=$(sudo find /etc/nginx -name "*.conf" 2>/dev/null | xargs grep -l "channel-project\|proxy_pass.*8000" 2>/dev/null | head -3)
+if [ -z "$NGINX_CONF" ]; then
+    NGINX_CONF=$(sudo find /etc/nginx -name "channel*" -o -name "*channel*" 2>/dev/null | head -3)
+fi
+if [ -n "$NGINX_CONF" ]; then
+    for f in $NGINX_CONF; do
+        if ! sudo grep -q "client_max_body_size" "$f" 2>/dev/null; then
+            sudo sed -i 's|^\(\s*\)server {|&\n\1client_max_body_size 500m;|' "$f" || true
+            echo "  + client_max_body_size 500m 已添加到 $f"
+        else
+            # 已是更大的值则保留,否则替换为 500m
+            CURRENT=$(sudo grep "client_max_body_size" "$f" | head -1 | grep -oE '[0-9]+[kmg]?')
+            case "$CURRENT" in
+                *[0-9][kmg]) echo "  = $f 已有 client_max_body_size $CURRENT, 保留";;
+                *) sudo sed -i 's|client_max_body_size [^[:space:]]*;|client_max_body_size 500m;|' "$f" && echo "  * $f 改为 500m";;
+            esac
+        fi
+    done
+    sudo nginx -t 2>&1 | tail -2 && sudo systemctl reload nginx 2>&1 && echo "  nginx reloaded"
+else
+    echo "  ⚠️ 未找到 Nginx 反向代理配置(跳过,可能部署是直连8000端口)"
+fi
+
 # 7. 启动服务
 echo "[7/7] 启动服务..."
 sudo systemctl start channel-project
