@@ -312,9 +312,34 @@ def preview_path(
     if cfg_obj is None:
         cfg_obj = _ensure_config(db)
 
+    # ★ 关键修复：如果项目已存在 + DB 里有 tender_folder/bid_folder，优先返回 DB 里的路径
+    # 原因：{responsible_sales}+{project_name}+{date} 模板里的 {date} 用 datetime.now()，
+    #       每次重新渲染日期都会变；建项目时的日期才是"真理"，DB 已记录。
+    #       不然用户今天建项目(2026-08-27)，明天上传时界面显示"2026-08-28"造成路径不一致
+    db_tender = ''
+    db_bid = ''
+    db_proj_for_preview = None
+    try:
+        db_proj_for_preview = db.query(Project).filter(Project.project_name == data.project_name).first()
+        if db_proj_for_preview:
+            db_tender = (db_proj_for_preview.tender_folder or '').strip()
+            db_bid = (db_proj_for_preview.bid_folder or '').strip()
+    except Exception:
+        pass
+
     root = render_project_root(cfg_obj, username, real_name, data.project_name, data.responsible_sales)
     tender = render_subfolder(root, '招标资料')
     bid = render_subfolder(root, '投标文档')
+
+    # 已存在项目：用 DB 路径（保持建项目时的日期不动）
+    if db_proj_for_preview and (db_tender or db_bid):
+        return PathPreviewResponse(
+            base_folder=root,  # 仅供参考,前端不会显示
+            tender_folder=db_tender or tender,
+            bid_folder=db_bid or bid,
+        )
+
+    # 新项目（DB 没有记录）：返回实时渲染的路径（前端用来给用户预览）
     return PathPreviewResponse(
         base_folder=root,
         tender_folder=tender,

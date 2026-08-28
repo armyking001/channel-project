@@ -2077,7 +2077,369 @@ const aiStyle = { display: 'inline-flex', fontFamily: '"PingFang SC","Microsoft 
 
 ---
 
-## 30. AI报表「模型配置」仅系统管理员可用（2026-08-27）
+## 31. AI报表「模型配置」仅系统管理员可用（2026-08-27）
+
+---
+
+## 32. 大文件上传报错（HTTP 413）+ 进度条 + 服务端流式分块（2026-08-28）
+
+### 背景
+
+用户截图反馈：上传 25M 文件时前端报"提交失败: Request failed with status code 413"，但实际上文件已成功传到服务器；后续测试 200M 文件直接报错无法上传。
+
+### 根因（三层叠加）
+
+| 层 | 默认限制 | 本次配置 |
+|---|---|---|
+| Nginx `client_max_body_size` | **1MB**（超就 413） | **500MB** |
+| uvicorn `--limit-max-requests` | 无 body 限制 | 保持不限 |
+| FastAPI/Starlette | 默认不限 body 大小 | 保持 |
+
+所以 **Nginx 的 1M 默认值就是拦路虎** —— 任何超过 1MB 的 POST 都会被 Nginx 直接拒绝（HTTP 413），根本到不了后端。
+
+为什么 25M 已传成功：第一次 POST 时文件可能比较小（用户选的可能是图片/小文档），后续再选大文件才会 413。所以"已经传上去了"≠"这次能传上去"。
+
+### 修改
+
+#### 1. 后端 — 流式分块 + 实时大小检查
+[backend/app/routers/file_storage.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/file_storage.py)
+
+- 新增 `_MAX_FILE_SIZE_DEFAULT = 500MB`、`_CHUNK_SIZE = 1MB`
+- 新增 `_get_max_file_size(db)` — 从 `config.yaml: upload.max_file_size_mb` 读取（默认 500）
+- 新增 `_read_upload_streaming(upload_file, max_size)` — **流式分块读取 + 超过 max_size 立即中止抛 413**
+- `upload_files` 用 `_read_upload_streaming(f, max_size)` 替代 `await f.read()`
+- 避免大文件一次 `read()` 撑爆内存（200MB 占用 ~200MB 内存，500MB 会爆）
+
+#### 2. 前端 — 进度条 + 分批上传 + 友好错误提示
+[frontend/src/components/ProjectForm.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/ProjectForm.jsx)
+
+1. 新增 state：`uploadProgress = { tender: { percent, currentFile, batchIndex, batchCount }, bid: {...} }`
+2. **改 fetch 为 XHR** — `xhr.upload.onprogress` 拿到真实字节进度
+3. **分批上传**：每批 ≤ 3 个文件，避免单次 form-data 体积过大
+4. **前置校验**：单文件 > 500MB 直接弹 alert 拒绝（不等传完再报 413）
+5. **UI 进度条**：
+   - 实时百分比 + 蓝色进度条
+   - 当前文件名（truncate + 完整显示）
+   - 批次信息（"批次 2/3"）
+6. **友好提示**：遇到 413 主动提示"Nginx client_max_body_size 配置问题"
+7. 拖拽区底部增加提示文字："单文件最大 500MB，超大文件请压缩分批上传"
+
+[frontend/src/api/index.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/api/index.jsx)
+
+- 新增 `uploadFormFilesXhr(instanceId, folderType, files, onProgress)` — DynamicForm 自营/渠道上传也用 XHR 版本（保留 `uploadFormFiles` 给不上传进度的场景）
+
+#### 3. 部署脚本 — 自动调 Nginx body 限制
+[deploy/remote_update.sh](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/deploy/remote_update.sh)
+
+新增 Step 6.5：
+
+```bash
+# 6.5 检查并修复 Nginx client_max_body_size（大文件上传必需）
+NGINX_CONF=$(sudo find /etc/nginx -name "*.conf" ... | head -3)
+# 对每个 conf：
+#   没有 client_max_body_size → 在 server { 之前插入 client_max_body_size 500m;
+#   已有但 < 500m → 改成 500m
+#   已有 ≥ 500m → 保留
+# sudo nginx -t && sudo systemctl reload nginx
+```
+
+部署时输出：
+```
+[6.5/7] 调整 Nginx body 限制...
+  * /etc/nginx/sites-available/channel 改为 500m
+  = /etc/nginx/sites-enabled/channel 已有 client_max_body_size 500m, 保留
+nginx: configuration file /etc/nginx/nginx.conf test is successful
+  nginx reloaded
+```
+
+### 验证
+
+| 测试 | 结果 |
+|---|---|
+| 本地 build | ✅ index-B8-kY6Pt.js 489KB / 143KB gzip |
+| 服务器部署 | ✅ PID 842527 active running |
+| Step 6.5 Nginx 调整 | ✅ 500m 已生效 |
+| /api/health | ✅ 200 |
+| /api/auth/login | ✅ 200 |
+| /api/projects/ | ✅ 200 total=9 |
+
+**用户验证步骤**：
+1. 浏览器 **Ctrl+Shift+R** 强制刷新
+2. 打开一个项目 → 编辑模式
+3. 拖拽一个大文件（如 200M rar）到文件管理区
+4. 应该看到：上传中... X% + 蓝色进度条 + 当前文件名 + 批次信息
+
+### 关键文件
+
+- 后端：[backend/app/routers/file_storage.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/file_storage.py)
+- 前端：[frontend/src/components/ProjectForm.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/ProjectForm.jsx)
+- 前端 API：[frontend/src/api/index.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/api/index.jsx)
+- 部署脚本：[deploy/remote_update.sh](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/deploy/remote_update.sh)
+
+### 教训（本轮）
+
+1. **Nginx `client_max_body_size` 默认 1M 是隐藏陷阱** —— 几乎所有反向代理场景都需要调大，但部署脚本之前没覆盖这一步
+2. **`fetch` 不支持上传进度** —— 必须用 `XMLHttpRequest.upload.onprogress`
+3. **`await file.read()` 不限大小** —— 一次读取超大文件会撑爆内存；流式分块是必须的
+4. **错误提示要让用户知道下一步怎么办** —— 413 一定要提示"Nginx client_max_body_size 配置问题"，而不是单纯弹"上传失败"
+
+### 配置扩展（可选）
+
+`config.yaml` 可加：
+```yaml
+upload:
+  max_file_size_mb: 500   # 单文件最大 MB，后端自动读取
+  max_batch_size: 3       # 单批最大文件数（前端硬编码,可改为读后端配置）
+```
+
+---
+
+## 33. preview-path 总是按当前日期渲染，覆盖建项目时的日期（2026-08-28）
+
+### 现象
+
+用户截图反馈：
+- WebDAV 磁盘目录上的文件夹：`张林+自营再测试+2026-08-27`（建项目时建立的，正确）
+- 系统界面显示：`张林+自营再测试+2026-08-28`（错的，是今天）
+- 上传的文件实际写到了 `2026-08-27` 目录（DB里的旧路径，对的）
+- 但用户看不到正确路径，被误导
+
+### 根因
+
+文件路径模板： `{responsible_sales}+{project_name}+{date}`
+
+`render_base_folder` 在 [backend/app/services/file_storage.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/services/file_storage.py) 第42 行：
+
+```python
+created_at = created_at or datetime.datetime.now()  # 每次调用都按"今天"渲染
+```
+
+而 **preview-path** 接口 [backend/app/routers/file_storage.py:315](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/file_storage.py#L315)：
+
+```python
+root = render_project_root(cfg_obj, username, real_name, data.project_name, data.responsible_sales)
+#           ↑ 没传 created_at 参数 → 用默认值 datetime.now()
+```
+
+前端 [frontend/src/components/ProjectForm.jsx:190-196](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/ProjectForm.jsx#L190-L196)：
+
+```js
+const [resTender, resBid] = await Promise.all([
+  previewFileStoragePath({ project_name: form.project_name, folder_type: 'tender', ... }),
+  previewFileStoragePath({ project_name: form.project_name, folder_type: 'bid', ... }),
+])
+setTenderPreview((resTender?.data ?? resTender)?.tender_folder || ...)
+setBidPreview((resBid?.data ?? resBid)?.bid_folder || ...)
+```
+
+→ 每次 useEffect 都用 preview-path（按"今天"渲染）覆盖了正确的 DB 路径。
+
+### 为什么 DB 里的路径是对的
+
+建项目时，后端 `create_project` 直接渲染一次路径写入 `Project.tender_folder / bid_folder` 字段，这就是"建项目时的日期"。
+
+### 修复
+
+[backend/app/routers/file_storage.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/file_storage.py)（preview-path 接口）：
+
+```python
+# 修复：项目已存在时优先返回 DB 路径（保持建项目时的日期）
+db_tender = ''
+db_bid = ''
+db_proj_for_preview = db.query(Project).filter(Project.project_name == data.project_name).first()
+if db_proj_for_preview:
+    db_tender = (db_proj_for_preview.tender_folder or '').strip()
+    db_bid = (db_proj_for_preview.bid_folder or '').strip()
+
+# 已存在项目：用 DB 路径（保持建项目时的日期不动）
+if db_proj_for_preview and (db_tender or db_bid):
+    return PathPreviewResponse(
+        base_folder=root,  # 仅供参考
+        tender_folder=db_tender or tender,
+        bid_folder=db_bid or bid,
+    )
+
+# 新项目（DB 没记录）：返回实时渲染路径（给用户预览）
+return PathPreviewResponse(
+    base_folder=root,
+    tender_folder=tender,
+    bid_folder=bid,
+)
+```
+
+### 修复后行为
+
+| 场景 | 之前 | 现在 |
+|---|---|---|
+| 新建项目（DB 无记录）| 按今天渲染（合理）| 按今天渲染（合理，用于预览）|
+| 已存在项目，今天打开 | 渲染成今天日期（错）| 返回 DB 路径 = 建项目时日期（对）|
+| 已存在项目，明天上传 | 渲染成明天日期（错）| 返回 DB 路径（对）|
+| 上传文件实际路径 | 走 DB 路径（对）| 走 DB 路径（对）|
+
+### 验证
+
+| 测试 | 结果 |
+|---|---|
+| 本地重启服务 | ✅ PID 17212, port 8765 ready |
+| OpenPreview /admin/ | ✅ 200, 新代码已加载 |
+| 用户操作 | 刷新浏览器,打开那个 "张林+自营再测试" 项目 |
+
+### 教训（本轮）
+
+1. **"重渲染" vs "读取已存"** —— 路径里有时间相关变量时，必须先查 DB 是否已有路径,优先用 DB 路径,避免每次渲染都变
+2. **`useEffect` 调用 preview 接口的副作用** —— 任何"预览"接口如果按时间渲染就会跟"真理"（DB）冲突,UI 显示会误导用户
+3. **AGENTS.md 之前没记录这种"模板渲染副作用"** —— 应当把"模板渲染的副作用"列入注意事项
+
+### 关键文件
+
+- 后端：[backend/app/routers/file_storage.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/file_storage.py)
+- 服务：[backend/app/services/file_storage.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/services/file_storage.py)
+- 前端：[frontend/src/components/ProjectForm.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/components/ProjectForm.jsx)
+
+---
+
+## 34. 申请账号报 `UnboundLocalError: UserRole`（2026-08-28）
+
+### 现象
+
+用户访问登录页 → 点击「申请账号」→ 填姓名 → 提交：
+```
+UnboundLocalError: cannot access local variable 'UserRole' where it is not associated with a value
+```
+
+### 根因（Python 编译期陷阱）
+
+[backend/app/routers/auth.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/auth.py) `apply_account` 函数内部有：
+
+```python
+try:
+    from app.services.notifications import send_notification
+    from app.models import UserRole, NotificationType    # ← 第216行 函数内 import
+    admins = db.query(User).filter(User.role == UserRole.admin, ...).all()
+```
+
+而该函数第195行已经引用了 `UserRole.normal`：
+
+```python
+user = User(
+    username='!PENDING_' + candidate,
+    ...
+    role=UserRole.normal,    # ← 第195行
+    is_active=False,
+)
+```
+
+**Python 编译期规则**：函数体内有任何名字的 `import` 或赋值，**整个函数**内所有该名字都被标记为 `local`（即使 import 出现在使用之后）。所以 `UserRole` 在 apply_account 中变成 local 变量，而 local 变量在第195行（import 之前）就被引用 → `UnboundLocalError`。
+
+`register` 函数也有同样的"函数内 import"问题（第106行），但 register 的 import 在使用之前（先import再114行用），所以 register 不会报错——只有 apply_account 报错。
+
+### 修复
+
+[backend/app/routers/auth.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/auth.py)：
+
+1. **顶部 import 加上 NotificationType**：
+   ```python
+   from app.models import User, AuditAction, UserRole, NotificationType
+   ```
+
+2. **删除 register 函数内第106行** `from app.models import UserRole`：
+   ```python
+   if current_user.role.value != "admin":
+       raise HTTPException(status_code=403, detail="仅管理员可注册账号")
+   # 删掉了: from app.models import UserRole
+   existing = db.query(User).filter(User.username == username).first()
+   ```
+
+3. **删除 apply_account 函数内第216行** `from app.models import UserRole, NotificationType`：
+   ```python
+   try:
+       from app.services.notifications import send_notification
+       # 删掉了: from app.models import UserRole, NotificationType
+       admins = db.query(User).filter(User.role == UserRole.admin, ...).all()
+   ```
+
+### 验证
+
+| 测试 | 结果 |
+|---|---|
+| 本地 Python 测试 | `POST /api/auth/apply-account {real_name: "测试名字"}` → 200 OK，body 含 `username="xxxx"` + `initial_password="R7pu4fsG"` |
+| 本地服务重启 | ✅ PID 29924, port 8765 ready |
+
+### 教训（本轮）
+
+1. **Python 函数内 import 是隐藏陷阱** —— 编译期把名字标记为 local，导致 import 之前的引用全部 UnboundLocalError
+2. **原则：import 一律写在文件顶部** —— 不要在函数内 import 已经在顶部 import 过的名字
+3. **PyCharm/IDE 通常会警告** —— 用 `from app.models import X` (X 已经在顶部) 会显示灰色提示
+4. **审查时要看 import 在函数内的位置** —— 如果 import 在使用之前，至少不会报错，但仍是代码异味
+
+### 关键文件
+
+- 后端：[backend/app/routers/auth.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/auth.py)
+
+---
+
+## 35. 最小化 Hotfix 增量部署（2026-08-28 17:20）
+
+### 背景
+
+用户在 08:50 全量部署 `de7f03b` 后，发现两个独立 Bug：
+1. 大文件上传 HTTP 413（→ 第 32 章修复）
+2. 申请账号 UnboundLocalError（→ 第 34 章修复）
+
+第 32 章修复涉及前端 build / 后端路由 / Nginx body 限制，已在 `3d69e7e deploy: 2026-08-28 16:47` 全量部署时一起带上。
+
+第 34 章修复（auth.py UnboundLocalError）+ 第 33 章修复（preview-path 日期）只涉及两个 Python 文件。
+
+### 为什么不直接 deploy_all.py 全量部署？
+
+- 全量 tar 91MB，打包+上传+解压耗时 15+ 分钟
+- 本次只改了 3 个文件（auth.py + file_storage.py + AGENTS.md），合计 ~48KB
+- 重新打 tar 包还得再次构建前端（虽 bundle hash 没变，但 npm install 会重跑）
+
+### 方案：SCP 单文件上传 + 重启
+
+写了一个最小化脚本 [deploy/_hotfix_2026-08-28.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/deploy/_hotfix_2026-08-28.py)（已执行后删除）：
+
+```python
+files_to_upload = [
+    (本地 auth.py        → /opt/.../backend/app/routers/auth.py),
+    (本地 file_storage.py → /opt/.../backend/app/routers/file_storage.py),
+    (本地 AGENTS.md       → /opt/.../AGENTS.md),
+]
+# 每条 scp + ssh 重启 + 健康检查 + apply-account 测试
+```
+
+### 验证（服务器实际返回）
+
+| 测试 | 结果 |
+|---|---|
+| scp auth.py (9.2 KB) | ✅ 4.4 MB/s |
+| scp file_storage.py (36 KB) | ✅ 5.8 MB/s |
+| scp AGENTS.md (132 KB) | ✅ 21 MB/s |
+| `sudo systemctl restart channel-project` | ✅ Active running (PID 974026)|
+| `/api/health` | ✅ 200 `{"status":"ok"}` |
+| **`/api/auth/apply-account {real_name: "hotfix-test-临时用户"}`** | ✅ **200 `{"username":"xsxxx","initial_password":"hNZlfQke"}`** |
+
+### 数据保留确认
+
+| 项 | 是否保留 |
+|---|---|
+| 数据库 data.db | ✅ 整个部署期间未触达 `/opt/channel-project/backend/data.db` |
+| config.yaml | ✅ 未触达 |
+| 已上传文件（WebDAV 172NAS）| ✅ 整个部署未触达 WebDAV |
+| 用户账号 / 项目数据 / 审批 | ✅ 全部保留 |
+| nginx 配置（client_max_body_size 500m） | ✅ 已有，保留 |
+
+### 教训（本轮）
+
+1. **大项目也可以"外科手术式"热更新** —— 不必每次都全量打包上传。知道改了什么、只传什么，3 秒/文件就完成
+2. **winpty 转义吃 body 是已知限制** —— shell 复合命令里单引号会被吃，复杂验证用 Python TestClient 写脚本更稳
+3. **部署可以分层** —— 紧急 hotfix 用最小化脚本，全量功能更新用 deploy_all.py
+
+### 关键文件
+
+- 部署脚本（临时）：[deploy/_hotfix_2026-08-28.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/deploy/_hotfix_2026-08-28.py)（已删除）
+- 复用的工具函数：[deploy/deploy_all.py:96](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/deploy/deploy_all.py#L96)（`run_with_password` / `SCP` / `SSH` / 常量）
 
 ### 需求
 

@@ -3,7 +3,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models import User, AuditAction, UserRole
+from app.models import User, AuditAction, UserRole, NotificationType
 from app.schemas import UserLogin, TokenResponse, UserResponse, MessageResponse, ApplyAccountResponse
 from app.auth import verify_password, create_access_token, get_current_user, hash_password
 from app.services.audit import write_audit
@@ -103,7 +103,6 @@ def register(
 ):
     if current_user.role.value != "admin":
         raise HTTPException(status_code=403, detail="仅管理员可注册账号")
-    from app.models import UserRole
     existing = db.query(User).filter(User.username == username).first()
     if existing:
         raise HTTPException(status_code=400, detail="用户名已存在")
@@ -213,7 +212,6 @@ def apply_account(
     # 通知所有系统管理员 — 有新的账号申请待审批
     try:
         from app.services.notifications import send_notification
-        from app.models import UserRole, NotificationType
         admins = db.query(User).filter(User.role == UserRole.admin, User.is_active == True).all()
         for admin in admins:
             send_notification(
