@@ -161,6 +161,7 @@ export const updateNotificationSetting = (type, data) => api.put(`/notifications
 export const sendAnnouncement = (data) => api.post('/notifications/announce', data)
 export const listNotificationChannels = () => api.get('/notifications/channels')
 export const upsertNotificationChannel = (type, data) => api.post(`/notifications/channels/${type}`, data)
+export const testNotificationChannel = (type, data) => api.post(`/notifications/channels/${type}/test`, data)
 
 // 通知文案模板
 export const listNotificationTemplates = () => api.get('/notifications/templates')

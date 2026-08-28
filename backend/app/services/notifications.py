@@ -283,17 +283,31 @@ async def _push_external_async(receiver_id, notification_id, ntype_value, title,
 
 
 def _send_sms_sync(db, user, title, content):
-    """同步版短信投递(已开新 session)"""
+    """同步版短信投递(已开新 session)
+    优先级:sms_custom(可定制第三方) > aliyun > tencent
+    """
+    msg_body = (content or '') if content else (title or '')
+    msg = '[{}] {}'.format(title, msg_body)
+    # 自动加全局题头
+    msg = apply_prefix(db, msg, 'sms')
+    # 1) 优先:可定制第三方短信云平台
+    custom = db.query(NotificationChannel).filter(
+        NotificationChannel.type == 'sms_custom', NotificationChannel.enabled == True,
+    ).first()
+    if custom:
+        try:
+            cfg = json.loads(custom.config)
+            result = _send_sms_custom_sync(cfg, user.phone, title, msg)
+            log.info(f"[sms.custom] -> {user.phone} ok={result.get('ok')} status={result.get('status_code')}")
+        except Exception as e:
+            log.warning(f"[sms.custom] 调用失败 user={user.id}: {e}")
+        return
     aliyun = db.query(NotificationChannel).filter(
         NotificationChannel.type == 'sms_aliyun', NotificationChannel.enabled == True,
     ).first()
     tencent = db.query(NotificationChannel).filter(
         NotificationChannel.type == 'sms_tencent', NotificationChannel.enabled == True,
     ).first()
-    msg_body = (content or '') if content else (title or '')
-    msg = '[{}] {}'.format(title, msg_body)
-    # 自动加全局题头
-    msg = apply_prefix(db, msg, 'sms')
     if aliyun:
         log.info(f"[sms.aliyun] -> {user.phone} msg={msg!r} (provider configured, real call here)")
         return
@@ -301,6 +315,95 @@ def _send_sms_sync(db, user, title, content):
         log.info(f"[sms.tencent] -> {user.phone} msg={msg!r}")
         return
     log.info(f"[sms] no provider configured, skip user={user.id}")
+
+
+def _send_sms_custom_sync(cfg: dict, phone: str, title: str, content: str) -> dict:
+    """可定制第三方短信云平台 — POST 渲染模板
+    cfg 字段:
+      - endpoint (必填) : 接收 POST 的 URL
+      - method (可选,默认 POST)
+      - headers (可选 dict, 如 Authorization / Content-Type)
+      - body_template (必填) : 请求体, 支持占位符 {phone}/{title}/{content}/{sign_name}
+      - sign_name (可选) : 替换 body_template 中的 {sign_name}
+      - success_keys (可选 list) : 响应 JSON 中视为成功的 key 列表(等价于 errcode=0), 例如 ["code","status"]
+      - success_value (可选) : 视为成功的值, 默认 0 或 "0" 或 "OK"
+      - timeout (可选秒,默认 10)
+    返回: { ok, status_code, response_text, response_json? }
+    """
+    endpoint = (cfg.get('endpoint') or '').strip()
+    if not endpoint:
+        return {"ok": False, "error": "endpoint 为空"}
+    method = (cfg.get('method') or 'POST').upper()
+    headers = cfg.get('headers') or {}
+    body_tpl = cfg.get('body_template')
+    if body_tpl is None:
+        return {"ok": False, "error": "body_template 为空"}
+    sign_name = cfg.get('sign_name') or ''
+    success_keys = cfg.get('success_keys') or ['code', 'errcode', 'status']
+    success_value = cfg.get('success_value')
+    timeout = int(cfg.get('timeout') or 10)
+
+    # 渲染占位符
+    def _render(v):
+        if isinstance(v, str):
+            return v.format(phone=phone, title=title, content=content, sign_name=sign_name)
+        if isinstance(v, list):
+            return [_render(x) for x in v]
+        if isinstance(v, dict):
+            return {k: _render(x) for k, x in v.items()}
+        return v
+
+    rendered_body = _render(body_tpl)
+    # body: str 直接发; dict/list 转 JSON
+    if isinstance(rendered_body, (dict, list)):
+        data = json.dumps(rendered_body, ensure_ascii=False)
+        if 'Content-Type' not in headers and 'content-type' not in headers:
+            headers.setdefault('Content-Type', 'application/json; charset=utf-8')
+    else:
+        data = rendered_body if isinstance(rendered_body, str) else str(rendered_body)
+
+    # 替换 header 占位符(同样支持)
+    rendered_headers = _render(headers) if headers else {}
+
+    try:
+        if method == 'GET':
+            r = requests.get(endpoint, params=json.loads(data) if isinstance(data, str) and data.startswith('{') else None,
+                             headers=rendered_headers, timeout=timeout)
+        else:
+            r = requests.request(method, endpoint, data=data, headers=rendered_headers, timeout=timeout)
+    except Exception as e:
+        return {"ok": False, "error": f"HTTP 异常: {e}"}
+
+    resp_text = (r.text or '')[:2000]
+    out = {"ok": False, "status_code": r.status_code, "response_text": resp_text}
+    # 尝试解析 JSON 判定业务成功
+    try:
+        j = r.json()
+        out["response_json"] = j
+        # 1) HTTP 2xx 且 body 里有 success_keys 命中 success_value -> 成功
+        if 200 <= r.status_code < 300:
+            ok = False
+            for k in success_keys:
+                if k in j:
+                    v = j.get(k)
+                    if success_value is None:
+                        # 默认: 0 / "0" / "OK" / true 视为成功
+                        if v in (0, "0", "OK", "ok", True, "success", "Success", "200"):
+                            ok = True
+                            break
+                    else:
+                        if v == success_value:
+                            ok = True
+                            break
+            # 如果没有任何成功 key, 默认 2xx 视为成功(纯 webhook 风格)
+            if not success_keys and 200 <= r.status_code < 300:
+                ok = True
+            out["ok"] = ok
+        return out
+    except Exception:
+        # 非 JSON 响应 — 按 HTTP 状态判定
+        out["ok"] = 200 <= r.status_code < 300
+        return out
 
 
 def _send_dingtalk_sync(user, title, content, target_type):

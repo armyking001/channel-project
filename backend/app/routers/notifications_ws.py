@@ -15,6 +15,7 @@ from app.models import (
     NotificationChannel,
     NotificationGlobalConfig,
     NotificationSetting,
+    NotificationTemplate,
     NotificationType,
     User,
 )
@@ -196,8 +197,16 @@ def upsert_channel(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    if ctype not in ("dingtalk_webhook", "dingtalk_corp", "sms_aliyun", "sms_tencent"):
+    if ctype not in ("dingtalk_webhook", "dingtalk_corp", "sms_aliyun", "sms_tencent", "sms_custom"):
         raise HTTPException(status_code=400, detail="未知通道配置")
+    # sms_custom：必须包含 endpoint 和 body_template
+    if ctype == "sms_custom":
+        if not isinstance(payload.config, dict):
+            raise HTTPException(status_code=400, detail="config 必须是 JSON 对象")
+        if not payload.config.get("endpoint"):
+            raise HTTPException(status_code=400, detail="config.endpoint 必填(短信云平台接收 POST 的 URL)")
+        if not payload.config.get("body_template"):
+            raise HTTPException(status_code=400, detail="config.body_template 必填(请求体模板, 支持 {phone}/{title}/{content}/{sign_name} 占位符)")
     row = db.query(NotificationChannel).filter(NotificationChannel.type == ctype).first()
     if not row:
         row = NotificationChannel(type=ctype)
@@ -208,6 +217,44 @@ def upsert_channel(
     db.commit()
     db.refresh(row)
     return row
+
+
+@router.post("/channels/{ctype}/test")
+def test_channel(
+    ctype: str,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """测试通道 — 当前仅对 sms_custom 真正 POST 一次
+    入参: { phone, title?, content? }
+    返回: { ok, status_code, response_text, latency_ms, error? }
+    """
+    import time as _t
+    from app.services.notifications import _send_sms_custom_sync
+    if ctype != "sms_custom":
+        raise HTTPException(status_code=400, detail="该接口目前仅用于 sms_custom 测试")
+    phone = (payload or {}).get("phone") or ""
+    title = (payload or {}).get("title") or "测试通知"
+    content = (payload or {}).get("content") or "这是一条来自销售项目管理系统的测试短信。"
+    if not phone:
+        raise HTTPException(status_code=400, detail="phone 必填")
+    row = db.query(NotificationChannel).filter(
+        NotificationChannel.type == ctype,
+    ).first()
+    if not row or not row.enabled:
+        raise HTTPException(status_code=400, detail="sms_custom 通道未配置或未启用")
+    try:
+        cfg = json.loads(row.config)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="config 解析失败: {}".format(e))
+    t0 = _t.time()
+    try:
+        result = _send_sms_custom_sync(cfg, phone, title, content)
+        result['latency_ms'] = int((_t.time() - t0) * 1000)
+        return result
+    except Exception as e:
+        return {"ok": False, "error": str(e), "latency_ms": int((_t.time() - t0) * 1000)}
 
 
 # ============== 通知文案模板(自定义编辑) ==============

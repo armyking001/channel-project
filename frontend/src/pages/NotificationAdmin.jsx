@@ -3,6 +3,7 @@ import {
   sendAnnouncement,
   listNotificationChannels,
   upsertNotificationChannel,
+  testNotificationChannel,
   listNotificationTemplates,
   upsertNotificationTemplate,
   deleteNotificationTemplate,
@@ -15,6 +16,7 @@ const CHANNEL_TYPES = [
   { v: 'dingtalk_corp', l: '钉钉企业应用(工作通知)', cfgHint: '{ corp_id: "ding...", agent_id: "...", app_key: "...", app_secret: "..." }' },
   { v: 'sms_aliyun', l: '阿里云短信', cfgHint: '{ access_key_id, access_key_secret, sign_name, template_id }' },
   { v: 'sms_tencent', l: '腾讯云短信', cfgHint: '{ secret_id, secret_key, app_id, template_id, sign_name }' },
+  { v: 'sms_custom', l: '第三方短信云平台(可定制)', cfgHint: '结构化表单 - 详见编辑弹窗' },
 ]
 
 const TYPE_LABELS = {
@@ -135,21 +137,110 @@ export default function NotificationAdmin() {
   const openEdit = (ch) => {
     let cfg
     try { cfg = JSON.parse(ch.config || '{}') } catch (_) { cfg = {} }
-    setEdit({ type: ch.type, name: ch.name, configText: JSON.stringify(cfg, null, 2), enabled: ch.enabled })
+    setEdit({
+      type: ch.type,
+      name: ch.name,
+      enabled: ch.enabled,
+      // 通用 JSON 文本(非 sms_custom 时使用)
+      configText: ch.type === 'sms_custom' ? '' : JSON.stringify(cfg, null, 2),
+      // sms_custom 结构化字段
+      custom: ch.type === 'sms_custom' ? normalizeCustomCfg(cfg) : null,
+      testPhone: '',
+      testResult: null,
+      testing: false,
+    })
   }
 
-  const newChannel = (ctype) => setEdit({ type: ctype, name: CHANNEL_TYPES.find(c => c.v === ctype).l, configText: '{}', enabled: true })
+  const newChannel = (ctype) => setEdit({
+    type: ctype,
+    name: CHANNEL_TYPES.find(c => c.v === ctype).l,
+    enabled: true,
+    configText: ctype === 'sms_custom' ? '' : '{}',
+    custom: ctype === 'sms_custom' ? normalizeCustomCfg({}) : null,
+    testPhone: '',
+    testResult: null,
+    testing: false,
+  })
+
+  const normalizeCustomCfg = (cfg) => ({
+    endpoint: cfg.endpoint || '',
+    method: cfg.method || 'POST',
+    headersText: cfg.headers ? JSON.stringify(cfg.headers, null, 2) : '{\n  "Authorization": "Bearer YOUR_API_KEY"\n}',
+    bodyTemplateText: cfg.body_template
+      ? JSON.stringify(cfg.body_template, null, 2)
+      : JSON.stringify({
+          phone: '{phone}',
+          sign_name: '{sign_name}',
+          content: '{content}',
+        }, null, 2),
+    signName: cfg.sign_name || '',
+    successKeysText: (cfg.success_keys || ['code', 'errcode', 'status']).join(','),
+    successValue: cfg.success_value != null ? String(cfg.success_value) : '',
+    timeout: cfg.timeout || 10,
+  })
+
+  const buildCustomCfg = (c) => {
+    let headers = {}
+    try { headers = JSON.parse(c.headersText || '{}') } catch (_) { throw new Error('Headers 不是合法 JSON') }
+    let body_template
+    try { body_template = JSON.parse(c.bodyTemplateText || '{}') } catch (_) { throw new Error('Body 模板不是合法 JSON') }
+    const success_keys = c.successKeysText.split(',').map(s => s.trim()).filter(Boolean)
+    const cfg = {
+      endpoint: c.endpoint.trim(),
+      method: (c.method || 'POST').toUpperCase(),
+      headers,
+      body_template,
+    }
+    if (c.signName) cfg.sign_name = c.signName
+    if (success_keys.length) cfg.success_keys = success_keys
+    if (c.successValue) cfg.success_value = isNaN(Number(c.successValue)) ? c.successValue : Number(c.successValue)
+    if (c.timeout) cfg.timeout = Number(c.timeout)
+    return cfg
+  }
 
   const saveEdit = async () => {
     if (!edit) return
     let cfg
-    try { cfg = JSON.parse(edit.configText) } catch (_) { alert('配置必须是合法 JSON'); return }
+    try {
+      if (edit.type === 'sms_custom') {
+        cfg = buildCustomCfg(edit.custom)
+        if (!cfg.endpoint) { alert('Endpoint 不能为空'); return }
+        if (!cfg.body_template) { alert('Body 模板不能为空'); return }
+      } else {
+        try { cfg = JSON.parse(edit.configText) } catch (_) { alert('配置必须是合法 JSON'); return }
+      }
+    } catch (e) {
+      alert('配置错误: ' + e.message)
+      return
+    }
     try {
       await upsertNotificationChannel(edit.type, { name: edit.name, config: cfg, enabled: edit.enabled })
       setEdit(null)
       load()
     } catch (e) {
-      alert('保存失败: ' + (e && e.message))
+      alert('保存失败: ' + (e && e.response && e.response.data && e.response.data.detail || e.message))
+    }
+  }
+
+  const runChannelTest = async () => {
+    if (!edit) return
+    if (!edit.testPhone) { alert('请输入测试手机号'); return }
+    // 必须先保存才能测试(否则后端读不到 channel)
+    if (!edit.enabled) { alert('请先启用此通道'); return }
+    let cfg
+    try { cfg = buildCustomCfg(edit.custom) } catch (e) { alert('配置错误: ' + e.message); return }
+    setEdit(Object.assign({}, edit, { testing: true, testResult: null }))
+    try {
+      // 先 upsert(确保后端读到最新 config), 再 test
+      await upsertNotificationChannel(edit.type, { name: edit.name, config: cfg, enabled: edit.enabled })
+      const r = await testNotificationChannel(edit.type, {
+        phone: edit.testPhone,
+        title: edit.name + ' 测试',
+        content: '这是一条来自销售项目管理系统的测试短信。',
+      })
+      setEdit(Object.assign({}, edit, { testing: false, testResult: r.data || r }))
+    } catch (e) {
+      setEdit(Object.assign({}, edit, { testing: false, testResult: { ok: false, error: e && e.response && e.response.data && e.response.data.detail || e.message } }))
     }
   }
 
@@ -406,9 +497,10 @@ export default function NotificationAdmin() {
       {/* 通道编辑弹窗 */}
       {edit && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg shadow-xl w-[640px] max-w-[95vw] p-6 space-y-4">
-            <h3 className="font-bold text-lg">
+          <div className="bg-white rounded-lg shadow-xl w-[760px] max-w-[95vw] p-6 space-y-4 max-h-[92vh] overflow-y-auto">
+            <h3 className="font-bold text-lg flex items-center gap-2">
               {CHANNEL_TYPES.find(c => c.v === edit.type) ? CHANNEL_TYPES.find(c => c.v === edit.type).l : edit.type}
+              {edit.type === 'sms_custom' && <span className="text-xs px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded">✨ 可定制</span>}
             </h3>
             <p className="text-xs text-gray-500">
               配置示例:{CHANNEL_TYPES.find(c => c.v === edit.type) ? CHANNEL_TYPES.find(c => c.v === edit.type).cfgHint : ''}
@@ -421,14 +513,144 @@ export default function NotificationAdmin() {
                 className="mt-1 w-full border border-gray-300 rounded px-3 py-2"
               />
             </label>
-            <label className="block">
-              <span className="text-sm text-gray-700">配置 (JSON)</span>
-              <textarea
-                value={edit.configText}
-                onChange={e => setEdit(Object.assign({}, edit, { configText: e.target.value }))}
-                className="mt-1 w-full border border-gray-300 rounded px-3 py-2 font-mono text-sm h-48"
-              />
-            </label>
+
+            {/* sms_custom 结构化表单 */}
+            {edit.type === 'sms_custom' && edit.custom && (
+              <div className="space-y-3 bg-emerald-50/40 border border-emerald-200 rounded-lg p-4">
+                <div className="text-xs text-emerald-800 font-medium">
+                  📡 自定义第三方短信云平台 — 适配任何支持 HTTP POST 投递的短信服务商
+                </div>
+                <label className="block">
+                  <span className="text-sm text-gray-700">Endpoint (POST URL) <span className="text-red-500">*</span></span>
+                  <input
+                    value={edit.custom.endpoint}
+                    onChange={e => setEdit(Object.assign({}, edit, { custom: Object.assign({}, edit.custom, { endpoint: e.target.value }) }))}
+                    className="mt-1 w-full border border-gray-300 rounded px-3 py-2 font-mono text-sm"
+                    placeholder="https://sms.api.example.com/v1/send"
+                  />
+                </label>
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="block">
+                    <span className="text-sm text-gray-700">请求方法</span>
+                    <select
+                      value={edit.custom.method}
+                      onChange={e => setEdit(Object.assign({}, edit, { custom: Object.assign({}, edit.custom, { method: e.target.value }) }))}
+                      className="mt-1 w-full border border-gray-300 rounded px-3 py-2 text-sm"
+                    >
+                      <option>POST</option>
+                      <option>GET</option>
+                      <option>PUT</option>
+                    </select>
+                  </label>
+                  <label className="block">
+                    <span className="text-sm text-gray-700">超时(秒)</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={60}
+                      value={edit.custom.timeout}
+                      onChange={e => setEdit(Object.assign({}, edit, { custom: Object.assign({}, edit.custom, { timeout: Number(e.target.value) || 10 }) }))}
+                      className="mt-1 w-full border border-gray-300 rounded px-3 py-2 text-sm"
+                    />
+                  </label>
+                </div>
+                <label className="block">
+                  <span className="text-sm text-gray-700">Headers (JSON)</span>
+                  <textarea
+                    value={edit.custom.headersText}
+                    onChange={e => setEdit(Object.assign({}, edit, { custom: Object.assign({}, edit.custom, { headersText: e.target.value }) }))}
+                    className="mt-1 w-full border border-gray-300 rounded px-3 py-2 font-mono text-xs h-20"
+                    placeholder={'{\n  "Authorization": "Bearer YOUR_KEY"\n}'}
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-sm text-gray-700">
+                    Body 模板 (JSON, 支持占位符: <code>{'{phone}'}</code> <code>{'{title}'}</code> <code>{'{content}'}</code> <code>{'{sign_name}'}</code>) <span className="text-red-500">*</span>
+                  </span>
+                  <textarea
+                    value={edit.custom.bodyTemplateText}
+                    onChange={e => setEdit(Object.assign({}, edit, { custom: Object.assign({}, edit.custom, { bodyTemplateText: e.target.value }) }))}
+                    className="mt-1 w-full border border-gray-300 rounded px-3 py-2 font-mono text-xs h-32"
+                  />
+                </label>
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="block">
+                    <span className="text-sm text-gray-700">签名/品牌 (可选, 替换 body 中的 {`{sign_name}`})</span>
+                    <input
+                      value={edit.custom.signName}
+                      onChange={e => setEdit(Object.assign({}, edit, { custom: Object.assign({}, edit.custom, { signName: e.target.value }) }))}
+                      className="mt-1 w-full border border-gray-300 rounded px-3 py-2 text-sm"
+                      placeholder="如: 销售系统"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="text-sm text-gray-700">成功判定 Keys (逗号分隔)</span>
+                    <input
+                      value={edit.custom.successKeysText}
+                      onChange={e => setEdit(Object.assign({}, edit, { custom: Object.assign({}, edit.custom, { successKeysText: e.target.value }) }))}
+                      className="mt-1 w-full border border-gray-300 rounded px-3 py-2 text-sm"
+                      placeholder="code, errcode, status"
+                    />
+                  </label>
+                </div>
+                <label className="block">
+                  <span className="text-sm text-gray-700">成功判定 Value (可选, 留空则默认识别 0/OK/true)</span>
+                  <input
+                    value={edit.custom.successValue}
+                    onChange={e => setEdit(Object.assign({}, edit, { custom: Object.assign({}, edit.custom, { successValue: e.target.value }) }))}
+                    className="mt-1 w-full border border-gray-300 rounded px-3 py-2 text-sm"
+                    placeholder="0 / 200 / OK"
+                  />
+                </label>
+
+                {/* 测试区 */}
+                <div className="border-t border-emerald-200 pt-3 mt-3">
+                  <div className="text-xs text-emerald-800 font-semibold mb-2">🧪 测试发送(点击下方"保存配置"后再测试)</div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      value={edit.testPhone}
+                      onChange={e => setEdit(Object.assign({}, edit, { testPhone: e.target.value }))}
+                      className="flex-1 border border-gray-300 rounded px-3 py-2 text-sm"
+                      placeholder="测试手机号 (如 13800138000)"
+                    />
+                    <button
+                      onClick={runChannelTest}
+                      disabled={edit.testing || !edit.enabled}
+                      className={"px-4 py-2 rounded text-white text-sm " + (edit.testing || !edit.enabled ? 'bg-gray-400 cursor-not-allowed' : 'bg-emerald-500 hover:bg-emerald-600')}
+                    >
+                      {edit.testing ? '发送中…' : '发送测试短信'}
+                    </button>
+                  </div>
+                  {edit.testResult && (
+                    <div className={"mt-2 p-2 rounded text-xs font-mono " + (edit.testResult.ok ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800')}>
+                      <div>结果: {edit.testResult.ok ? '✅ 成功' : '❌ 失败'}</div>
+                      {edit.testResult.status_code != null && <div>HTTP 状态: {edit.testResult.status_code}</div>}
+                      {edit.testResult.latency_ms != null && <div>耗时: {edit.testResult.latency_ms} ms</div>}
+                      {edit.testResult.error && <div>错误: {edit.testResult.error}</div>}
+                      {edit.testResult.response_text && (
+                        <details className="mt-1">
+                          <summary className="cursor-pointer">查看响应</summary>
+                          <pre className="whitespace-pre-wrap break-all mt-1">{edit.testResult.response_text}</pre>
+                        </details>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* 通用 JSON 配置 (非 sms_custom) */}
+            {edit.type !== 'sms_custom' && (
+              <label className="block">
+                <span className="text-sm text-gray-700">配置 (JSON)</span>
+                <textarea
+                  value={edit.configText}
+                  onChange={e => setEdit(Object.assign({}, edit, { configText: e.target.value }))}
+                  className="mt-1 w-full border border-gray-300 rounded px-3 py-2 font-mono text-sm h-48"
+                />
+              </label>
+            )}
+
             <label className="flex items-center gap-2">
               <input
                 type="checkbox"
@@ -446,7 +668,7 @@ export default function NotificationAdmin() {
               <button
                 onClick={saveEdit}
                 className="px-4 py-2 rounded bg-blue-500 text-white hover:bg-blue-600"
-              >保存</button>
+              >保存配置</button>
             </div>
           </div>
         </div>

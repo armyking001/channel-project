@@ -1907,6 +1907,129 @@ const buttons = [
 
 - [frontend/src/pages/Projects.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/Projects.jsx)
 
+---
+
+## 30. 通知管理 — 增加可定制第三方短信云平台（sms_custom）（2026-08-28）
+
+### 背景
+
+业务上有需求对接国内/国外各种第三方短信云平台（华为云、容联、Twilio、自建网关等），这些平台每个的 API 形态都不同。用户要求在「通知管理 → 通知通道配置」中增加一个**可定制**的第三方短信云平台配置项，能配：
+- 任意 POST URL
+- 任意 Headers（如 `Authorization: Bearer xxx`）
+- 任意 Body 模板（占位符 `{phone}/{title}/{content}/{sign_name}` 替换）
+- 任意判定成功的方式（HTTP 2xx + 响应字段 = 某值）
+
+### 设计
+
+| 项 | 内容 |
+|---|---|
+| 通道 type | `sms_custom`（与已有 `sms_aliyun`/`sms_tencent` 同级） |
+| 投递优先级 | `sms_custom` > `sms_aliyun` > `sms_tencent`（首个启用即用） |
+| Config 字段 | `endpoint`(必填) / `method`(POST/GET/PUT) / `headers`(dict) / `body_template`(必填, dict 或 str) / `sign_name`(可选) / `success_keys`(list, 默认 `[code, errcode, status]`) / `success_value`(可选) / `timeout`(秒, 默认 10) |
+| 占位符 | `{phone}` `{title}` `{content}` `{sign_name}` — 递归替换 dict/list/str |
+| 成功判定 | HTTP 2xx 且响应 JSON 任意 success_key 等于 success_value → 成功；未配置 success_value 默认接受 0/"0"/"OK"/ok/true/"success"/200 |
+| 非 JSON 响应 | 仅按 HTTP 2xx 判定 |
+
+### 后端实现
+
+#### [backend/app/routers/notifications_ws.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/notifications_ws.py)
+
+1. **`upsert_channel`**：允许 `sms_custom` 类型；保存前校验 `endpoint` + `body_template` 必填
+2. **新增 `POST /api/notifications/channels/{ctype}/test`**：
+   - 入参 `{ phone, title?, content? }`
+   - 用当前 `sms_custom` 配置立刻 POST 一次，返回 `{ ok, status_code, response_text, response_json?, latency_ms, error? }`
+   - 仅 admin 可调
+
+3. **修复 bug**：原文件漏 `import NotificationTemplate`，导致 `list_templates` 接口运行时 `NameError`，全模块被 uvicorn 卸载、所有 `/api/notifications/*` 接口返回 502/422（包括 `auth/login` 因为 import 链）。已补齐。
+
+#### [backend/app/services/notifications.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/services/notifications.py)
+
+1. **新增 `_send_sms_custom_sync(cfg, phone, title, content)`**：递归渲染 body_template → POST → 校验成功
+2. **`_send_sms_sync`** 调整为 `sms_custom > aliyun > tencent` 优先级
+
+### 前端实现
+
+#### [frontend/src/api/index.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/api/index.jsx)
+
+- 新增 `testNotificationChannel(type, data)`
+
+#### [frontend/src/pages/NotificationAdmin.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/NotificationAdmin.jsx)
+
+1. `CHANNEL_TYPES` 加 `sms_custom`：「第三方短信云平台(可定制)」
+2. **打开/新建**：sms_custom 用结构化 state（`custom`），其他保持 JSON 文本
+3. **编辑弹窗**：
+   - sms_custom → 绿色高亮区块 + 结构化表单（Endpoint / Method / Headers / Body 模板 / 签名 / 成功判定 Keys / Value / 超时）
+   - 占位符说明：`{phone} {title} {content} {sign_name}`
+   - 「✨ 可定制」绿色徽章
+   - 内置「🧪 测试发送」区：输入测试手机号 → 自动 upsert 当前表单 → 调 test → 显示 HTTP 状态 / 耗时 / 响应原文（折叠 details）
+   - 其他通道 → 仍用 JSON 文本框（保持原行为）
+4. `normalizeCustomCfg(cfg)`：DB 配置 → UI 结构化字段
+5. `buildCustomCfg(c)`：UI 字段 → JSON 配置（含 JSON 校验）
+
+### 用法示例
+
+#### 阿里云短信 1.0（旧版，非 SDK 模式）
+
+```json
+{
+  "endpoint": "https://sms.aliyuncs.com/",
+  "method": "GET",
+  "headers": {},
+  "body_template": {
+    "PhoneNumbers": "{phone}",
+    "SignName": "{sign_name}",
+    "TemplateCode": "SMS_0000",
+    "TemplateParam": "{\"content\":\"{content}\"}"
+  },
+  "sign_name": "销售项目管理系统",
+  "success_keys": ["Code"],
+  "success_value": "OK"
+}
+```
+
+#### 通用 HTTP 推送（华为云/腾讯云/容联/Twilio 适配版）
+
+```json
+{
+  "endpoint": "https://sms.cn-hangzhou.example.com/v1/send",
+  "method": "POST",
+  "headers": {
+    "Authorization": "Bearer YOUR_API_KEY",
+    "Content-Type": "application/json"
+  },
+  "body_template": {
+    "to": "{phone}",
+    "from": "{sign_name}",
+    "body": "{content}"
+  },
+  "success_keys": ["errcode"],
+  "success_value": 0
+}
+```
+
+### 验证
+
+| 步骤 | 结果 |
+|---|---|
+| 后端启动 | ✅ 端口 8765, health 200 |
+| 前端 build | ✅ `index-Byb0RxBu.js` 21.68s |
+| `/admin/` 加载 | ✅ 200,新 bundle 已加载 |
+| `/admin/assets/index-*.css` | ✅ 200 |
+| OpenPreview 健康检查 | ✅ 200 |
+
+### 关键文件
+
+- 后端路由：[backend/app/routers/notifications_ws.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/notifications_ws.py)
+- 后端服务：[backend/app/services/notifications.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/services/notifications.py)
+- 前端 API：[frontend/src/api/index.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/api/index.jsx)
+- 前端页面：[frontend/src/pages/NotificationAdmin.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/NotificationAdmin.jsx)
+
+### 教训（本轮）
+
+1. **`NameError` 在模块顶层会拖垮整个 router** —— 之前 `from app.models import` 漏写 `NotificationTemplate`，导致 `list_templates` 接口运行时 `NameError`，整个 notifications_ws router 在 uvicorn 拒绝注册路由，所有 `/api/notifications/*` 路径（包括 `/auth/login` 因为被 import 链加载）全部 502/422
+2. **占位符递归渲染要稳** —— body_template 可能是 dict / list / str，纯字符串 `format` 在 dict 场景下 KeyError。必须递归遍历所有 leaf string 后 `.format(...)`
+3. **第三方平台的成功判定不能写死** —— 不同平台成功字段不一样（`code` / `errcode` / `status` / `Code` / `Result`），必须让用户配置
+
 ### 27.1 AI 字符宽度对齐
 
 **问题**：左栏菜单里 `📊 AI报表` 的 "AI" 两个英文字符比同行的"项目/管理"等汉字窄，造成上下菜单基线不对齐。
