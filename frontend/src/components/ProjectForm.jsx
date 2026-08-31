@@ -325,11 +325,11 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
     if (!files || files.length === 0) return
     const setter = folderType === 'tender' ? setUploadingTender : setUploadingBid
     setter(true)
-    // 单文件 500MB 上限（与后端 _MAX_FILE_SIZE_DEFAULT 对齐）
-    const MAX_FILE_SIZE = 500 * 1024 * 1024
+    // 单文件 1GB 上限（与后端 _MAX_FILE_SIZE_DEFAULT 对齐）
+    const MAX_FILE_SIZE = 1024 * 1024 * 1024
     const oversized = files.filter(f => f.size > MAX_FILE_SIZE)
     if (oversized.length) {
-      alert(`以下文件超过 500MB 单文件上限，请压缩后分批上传:\n${oversized.map(f => `• ${f.name} (${(f.size/1024/1024).toFixed(1)}MB)`).join('\n')}`)
+      alert(`以下文件超过 1GB 单文件上限，请压缩后分批上传:\n${oversized.map(f => `• ${f.name} (${(f.size/1024/1024).toFixed(1)}MB)`).join('\n')}`)
       setter(false)
       return
     }
@@ -399,7 +399,7 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
           allFailed.push({ batch: bi + 1, error: detail })
           // 413 时给出更友好提示
           if (result.status === 413) {
-            alert('提示: 服务端拒绝了请求体过大(413)。\n可能原因:\n1) 单文件超过 500MB 上限\n2) Nginx / 反向代理 body 限制过小\n请检查系统部署的 client_max_body_size 配置。')
+            alert('提示: 服务端拒绝了请求体过大(413)。\n可能原因:\n1) 单文件超过 1GB 上限\n2) Nginx / 反向代理 body 限制过小\n请检查系统部署的 client_max_body_size 配置。')
           }
           break
         } else {
@@ -503,7 +503,7 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
             <div className="space-y-1">
               <div className="text-base">📎 拖拽文件到此处</div>
               <div className="text-xs text-gray-400">或 <span className="text-blue-600">点击选择文件</span></div>
-              <div className="text-[10px] text-gray-400">单文件最大 500MB，超大文件请压缩分批上传</div>
+              <div className="text-[10px] text-gray-400">单文件最大 1GB，超大文件请压缩分批上传</div>
             </div>
           )}
         </div>

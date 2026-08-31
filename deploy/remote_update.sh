@@ -66,14 +66,14 @@ fi
 if [ -n "$NGINX_CONF" ]; then
     for f in $NGINX_CONF; do
         if ! sudo grep -q "client_max_body_size" "$f" 2>/dev/null; then
-            sudo sed -i 's|^\(\s*\)server {|&\n\1client_max_body_size 500m;|' "$f" || true
-            echo "  + client_max_body_size 500m 已添加到 $f"
+            sudo sed -i 's|^\(\s*\)server {|&\n\1client_max_body_size 1024m;|' "$f" || true
+            echo "  + client_max_body_size 1024m 已添加到 $f"
         else
-            # 已是更大的值则保留,否则替换为 500m
+            # 已是 >= 1024m 则保留,否则替换为 1024m
             CURRENT=$(sudo grep "client_max_body_size" "$f" | head -1 | grep -oE '[0-9]+[kmg]?')
             case "$CURRENT" in
-                *[0-9][kmg]) echo "  = $f 已有 client_max_body_size $CURRENT, 保留";;
-                *) sudo sed -i 's|client_max_body_size [^[:space:]]*;|client_max_body_size 500m;|' "$f" && echo "  * $f 改为 500m";;
+                1024m|1g|2048m|2g|4096m|4g|*g) echo "  = $f 已有 client_max_body_size $CURRENT, 保留";;
+                *) sudo sed -i 's|client_max_body_size [^[:space:]]*;|client_max_body_size 1024m;|' "$f" && echo "  * $f 改为 1024m";;
             esac
         fi
     done
