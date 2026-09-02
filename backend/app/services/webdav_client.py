@@ -123,7 +123,7 @@ def delete_file_webdav(config, target_url: str, timeout: int = 15) -> bool:
 
 
 def upload_file(config, target_url: str, content: bytes, timeout: int = 30):
-    """PUT 文件到 WebDAV
+    """PUT 文件到 WebDAV（一次性 bytes）
     target_url: 完整 URL（含文件名）
     content: 文件二进制
     返回 (ok, msg)
@@ -158,6 +158,107 @@ def upload_file(config, target_url: str, content: bytes, timeout: int = 30):
         return False, '连接超时'
     except requests.exceptions.ConnectionError as e:
         return False, f'连接失败: {e}'
+    except Exception as e:
+        return False, f'上传失败: {e}'
+
+
+def _iter_chunks(file_obj, chunk_size: int = 1024 * 1024):
+    """从文件对象逐 chunk 读取（生成器）
+
+    - 支持普通 file 对象（read(n)）
+    - 支持 FastAPI/Starlette UploadFile.file (SpooledTemporaryFile)
+    - 支持 SpooledTemporaryFile 实际是 BytesIO / TemporaryFile 的情况
+    """
+    while True:
+        chunk = file_obj.read(chunk_size)
+        if not chunk:
+            break
+        yield chunk
+
+
+def upload_file_streaming(config, target_url: str, data_iter=None, file_obj=None, file_size: int = None,
+                          timeout: int = 300, chunk_size: int = 1024 * 1024,
+                          on_progress=None):
+    """PUT 文件到 WebDAV (流式,内存恒定)
+    三种调用方式(优先 data_iter,其次 file_obj):
+      1. data_iter: 已构造好的 generator/iterator,逐 yield bytes
+      2. file_obj: 有 read(n) 方法的文件对象（UploadFile.file / open(..., 'rb') / BytesIO）
+    file_size: 文件总大小（用于 Content-Length; None 时使用 chunked transfer）
+    on_progress: 可选回调 on_progress(bytes_sent, total_bytes) -> None
+    返回 (ok, msg)
+
+    优势：
+    1. 内存占用恒定 ~chunk_size (默认 1MB),不一次性加载整个 600MB
+    2. requests 内部使用 chunked transfer,网络中断时已发部分不算失败
+    3. 配合 Content-Length 让 WebDAV 服务器 (如 Synology) 能提前分配空间
+    """
+    if not target_url.startswith('http'):
+        return False, f'非法 URL: {target_url}'
+    try:
+        # 1) 先确保父目录存在
+        ok, msg = _ensure_parent_dir(target_url, config, timeout=min(timeout, 15))
+        if not ok:
+            return False, f'父目录未就绪: {msg}'
+
+        # 2) 构造 chunk generator,带进度回调
+        def _gen():
+            sent = 0
+            total = file_size or 0
+            if data_iter is not None:
+                for chunk in data_iter:
+                    if not chunk:
+                        continue
+                    sent += len(chunk)
+                    if on_progress:
+                        try:
+                            on_progress(sent, total)
+                        except Exception:
+                            pass
+                    yield chunk
+            elif file_obj is not None:
+                for chunk in _iter_chunks(file_obj, chunk_size):
+                    sent += len(chunk)
+                    if on_progress:
+                        try:
+                            on_progress(sent, total)
+                        except Exception:
+                            pass
+                    yield chunk
+            else:
+                return  # 无数据源
+
+        # 3) 发送 headers(可选 Content-Length 提升 NAS 兼容性)
+        headers = {
+            'User-Agent': 'channel-project-storage/1.0',
+            'Content-Type': 'application/octet-stream',
+        }
+        if file_size:
+            headers['Content-Length'] = str(file_size)
+        else:
+            headers['Transfer-Encoding'] = 'chunked'
+
+        # 4) requests 实际以 chunked 形式 PUT（无需拼整文件）
+        resp = requests.put(
+            target_url,
+            data=_gen(),
+            auth=_auth(config),
+            headers=headers,
+            timeout=timeout,
+            verify=False,
+        )
+        if 200 <= resp.status_code < 300:
+            return True, f'HTTP {resp.status_code}'
+        if resp.status_code in (401, 403):
+            return False, f'认证失败 HTTP {resp.status_code}'
+        return False, f'HTTP {resp.status_code}: {resp.text[:200]}'
+    except requests.exceptions.SSLError as e:
+        return False, f'SSL 错误: {e}'
+    except requests.exceptions.ConnectTimeout:
+        return False, '连接超时'
+    except requests.exceptions.ConnectionError as e:
+        return False, f'连接失败: {e}'
+    except requests.exceptions.ReadTimeout:
+        return False, f'读取超时(文件过大,网络慢)'
     except Exception as e:
         return False, f'上传失败: {e}'
 

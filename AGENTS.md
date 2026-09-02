@@ -2485,3 +2485,93 @@ AI报表中的「模型配置」功能（模型 CRUD + 连接测试）只能系�
 | `backend/config.yaml` | （本次启动修复）数据库 URL 盘符 `Z:` → `Y:`，与仓库实际盘符对齐 |
 
 
+
+
+## 第 39 章 · 2026-08-31 大文件上传修复（流式 spool + 一次性 PUT）
+
+### 现象
+
+- 25MB 小文件能上传,200MB+ 大文件上传到 NAS 时 100% 后报 SSL 错误,文件实际没传到 NAS
+- 本地 webdav(172.16.10.252:5006)看不到大文件
+- 用户体验:拖大文件后浏览器卡 1 分钟再报错,前端进度条永远 100%
+
+### 排查结论(按时间顺序)
+
+#### 1. 项目 storage_zone 错配
+
+- 项目 1/2/3/10/11/12 绑定的 storage_zone 是 172.16.1.22(用户本地 NAS),不是生产 172.16.10.252
+- 测试时必须改用 project_id=4/6/7/8/9(绑 zone 172.16.10.252)才走得到生产 NAS
+- **用户已自己修复**:根据新建表单路径重新调整了自营/测试存储区域
+
+#### 2. starlette 解析 50MB+ multipart 失败(curl 默认 Expect 头)
+
+- curl 默认对大 body 加 Expect: 100-continue
+- 服务端收到 Expect 后返回 100 Continue,客户端再传 body,**starlette/python-multipart 解析 50MB+ 时报 502 Bad Gateway**
+- 禁用 Expect 头 (-H "Expect:") 后 50MB / 80MB 上传正常 (HTTP 200)
+- 100MB 走 Expect 流程 + 一次性读取会触发 uvicorn 默认 60s 超时(nginx 那一层也类似)
+
+#### 3. NAS / 前置 nginx 拒绝流式 PUT (Transfer-Encoding: chunked)
+
+- 直接 PUT 50MB + Content-Length: HTTP 201 成功 (4.5s)
+- 用 generator 做 streaming PUT (带 Content-Length): ConnectionAbortedError(10053) — NAS 前置 nginx 拒收
+- 用 generator + Transfer-Encoding: chunked: NAS 返回 HTTP 400 "Your browser sent a request that this server could not understand"
+- **结论: NAS 必须用一次性 Content-Length PUT,不能用 chunked / 流式**
+
+### 最终方案
+
+利用 starlette 默认行为:`UploadFile.file` 实际是 `SpooledTemporaryFile`(内存上限默认 1MB,超出 spool 到磁盘临时文件)。
+
+```
+# 大文件(>16MB): seek + 用 requests.put(data=f.file) 一次性 PUT
+# requests 看到 file object 会自动调用 seek(0) + tell() 设置 Content-Length,一次性 send
+# 内存恒定 ~1MB chunk (SpooledTemporaryFile 阈值) + 一次完整 body 在 wire
+
+try:
+    f.file.seek(0)
+except Exception:
+    pass
+if f.size and f.size > max_size:
+    raise HTTPException(413, ...)
+resp = requests.put(target_url, data=f.file, auth=..., timeout=300, verify=False)
+```
+
+### 关键改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `backend/app/routers/file_storage.py` | upload_files 增加 `use_streaming = f.size > 16MB` 分支;大文件 WebDAV 用 `requests.put(data=f.file)` (SpooledTemporaryFile seek 后一次性 PUT);本地模式继续用 `_iter_upload_with_limit` 流式写文件 |
+| `backend/app/services/webdav_client.py` | 新增 `upload_file_streaming` 函数 (备用,暂未使用);原 `upload_file` (一次性 bytes) 保留作为小文件路径 |
+
+### 测试结果(8766 端口本地测试)
+
+| 文件大小 | 路径 | 耗时 | HTTP | 备注 |
+|---|---|---|---|---|
+| 5MB | 旧 bytes | 0.9s | 200 | OK success:true |
+| 50MB | 新 spool+put | 5.1s | 200 | OK success:true |
+| 80MB | 新 spool+put | 15.2s | 200 | OK success:true |
+| 200MB | 新 spool+put | 39.5s | 200 | OK success:true (验证大文件 OK) |
+
+### 内存占用对比
+
+| 方案 | 内存峰值 (1GB 文件) |
+|---|---|
+| 旧一次性 bytes | 1GB+ (整文件 + PUT 缓冲) |
+| 新 SpooledTemporaryFile + 一次性 PUT | ~1MB (starlette spool 阈值) |
+
+### 踩坑总结
+
+1. **NAS 拒收流式 PUT** — 一定要先确认目标服务器接受 `Transfer-Encoding: chunked`,否则用 SpooledTemporaryFile + 一次性 PUT
+2. **curl 默认 Expect 头** — 调试大文件上传时手动加 `-H "Expect:"` 才能稳定复现
+3. **starlette UploadFile.file 是 SpooledTemporaryFile** — 直接 `seek(0)` 后传给 `requests.put(data=...)` 即可,无需自己手动 chunk
+4. **测试要选对 zone** — 同一个 project 表里多个 storage_zone,本地测试时用 zone 9 (172.16.10.252)
+
+### 仍未完成 / 后续
+
+- 前端进度条:目前上传过程前端能感知 (axios / fetch 的 onprogress 事件),但后端到 NAS 的进度目前没暴露
+- 用户调整 zone 后,zone 5/6 (172.16.1.22) 还指向不可达 NAS,本地再测会再遇到 SSL;建议清掉旧 zone 或修正 IP
+
+### 关键代码引用
+
+- `backend/app/routers/file_storage.py:upload_files` (router 接口,大文件分支在 line 651+)
+- `backend/app/routers/file_storage.py:_iter_upload_with_limit` (本地流式写)
+- `backend/app/services/webdav_client.py:upload_file_streaming` (备用流式上传)

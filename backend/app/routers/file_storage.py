@@ -37,6 +37,53 @@ _MAX_FILE_SIZE_DEFAULT = 1024 * 1024 * 1024  # 1GB
 _CHUNK_SIZE = 1024 * 1024  # 1MB 流式分块
 
 
+def _read_upload_streaming(upload_file: UploadFile, max_size: int, on_progress=None):
+    """流式读取 UploadFile 到字节数组，超过 max_size 抛错（一次性 bytes 路径）"""
+    received = bytearray()
+    try:
+        while True:
+            chunk = upload_file.file.read(_CHUNK_SIZE)
+            if not chunk:
+                break
+            received.extend(chunk)
+            if on_progress:
+                try:
+                    on_progress(len(received))
+                except Exception:
+                    pass
+            if len(received) > max_size:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f'文件 {upload_file.filename!r} 超过单文件大小限制 '
+                           f'({max_size // 1024 // 1024}MB)，请压缩后分批上传',
+                )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f'读取上传流失败: {e}')
+    return bytes(received)
+
+
+def _iter_upload_with_limit(upload_file: UploadFile, max_size: int, chunk_size: int = _CHUNK_SIZE):
+    """边读边校验大小,生成器(不一次性加载到内存)。
+
+    设计目的：避免大文件把内存撑爆。
+    """
+    received = 0
+    while True:
+        chunk = upload_file.file.read(chunk_size)
+        if not chunk:
+            break
+        received += len(chunk)
+        if received > max_size:
+            raise HTTPException(
+                status_code=413,
+                detail=f'文件 {upload_file.filename!r} 超过单文件大小限制 '
+                       f'({max_size // 1024 // 1024}MB)，请压缩后分批上传',
+            )
+        yield chunk
+
+
 def _get_max_file_size(db: Session) -> int:
     """从 config.yaml 读取 max_file_size_mb，未配置则用默认 1024MB (1GB)"""
     try:
@@ -598,67 +645,173 @@ async def upload_files(
         counter = 1
 
         try:
-            # 流式分块读取（避免大文件占用过多内存 + 实时检查大小）
-            content = _read_upload_streaming(f, max_size)
-            if cfg.mode == StorageMode.local:
-                os.makedirs(target_dir, exist_ok=True)
-                full_path = os.path.join(target_dir, final_name)
-                if os.path.exists(full_path):
-                    if overwrite_flag:
-                        try:
-                            os.remove(full_path)
-                        except OSError:
-                            pass
-                    else:
-                        while os.path.exists(full_path):
-                            base, ext = os.path.splitext(safe_name)
-                            final_name = f'{base}_{counter}{ext}'
-                            full_path = os.path.join(target_dir, final_name)
-                            counter += 1
+            # 内存占用优化:大文件(>16MB)走 streaming,内存恒定 1MB chunk
+            use_streaming = (f.size or 0) > 16 * 1024 * 1024
+
+            if use_streaming:
+                # 流式分支:边读边校验大小 + 边写
+                bytes_sent = 0
+
+                # 先 seek 到开头（防止 UploadFile 被多次消费）
                 try:
-                    with open(full_path, 'wb') as out:
-                        out.write(content)
-                    uploaded.append({
-                        'name': final_name,
-                        'path': full_path,
-                        'size': len(content),
-                        'uploader': current_user.real_name or current_user.username,
-                        'uploader_username': current_user.username,
-                        'upload_time': int(datetime.now().timestamp()),
-                        'overwritten': overwrite_flag and final_name == safe_name,
-                    })
-                except Exception as _e:
-                    import traceback as _tb
-                    failed.append({'name': final_name, 'error': f'{type(_e).__name__}: {_e} | dir w={os.access(target_dir, os.W_OK)} | exists={os.path.exists(full_path)} | cwd={os.getcwd()} | tb={_tb.format_exc()[:500]}'})
-                    raise
-            else:
-                try:
-                    from app.services.webdav_client import upload_file, delete_file_webdav, list_files_webdav
-                    webdav_target = target_dir if target_dir.startswith('http') else render_subfolder(rendered_root, sub_label)
-                    target_url = webdav_target.rstrip('/') + '/' + final_name
-                    if not target_url.startswith('http'):
-                        target_url = 'http://invalid' + target_url
-                    overwritten = False
-                    if overwrite_flag:
-                        ok_list, existing = list_files_webdav(cfg, webdav_target, project_name_hint=project_name)
-                        if ok_list and any(x.get('name') == final_name for x in existing):
-                            delete_file_webdav(cfg, target_url)
-                            overwritten = True
-                    ok, msg = upload_file(cfg, target_url, content)
-                    if ok:
+                    f.file.seek(0)
+                except Exception:
+                    pass
+
+                if cfg.mode == StorageMode.local:
+                    os.makedirs(target_dir, exist_ok=True)
+                    full_path = os.path.join(target_dir, final_name)
+                    if os.path.exists(full_path):
+                        if overwrite_flag:
+                            try:
+                                os.remove(full_path)
+                            except OSError:
+                                pass
+                        else:
+                            while os.path.exists(full_path):
+                                base, ext = os.path.splitext(safe_name)
+                                final_name = f'{base}_{counter}{ext}'
+                                full_path = os.path.join(target_dir, final_name)
+                                counter += 1
+                    try:
+                        with open(full_path, 'wb') as out:
+                            for chunk in _iter_upload_with_limit(f, max_size):
+                                out.write(chunk)
+                                bytes_sent += len(chunk)
                         uploaded.append({
                             'name': final_name,
-                            'path': target_url,
+                            'path': full_path,
+                            'size': bytes_sent or os.path.getsize(full_path),
+                            'uploader': current_user.real_name or current_user.username,
+                            'uploader_username': current_user.username,
+                            'upload_time': int(datetime.now().timestamp()),
+                            'overwritten': overwrite_flag and final_name == safe_name,
+                        })
+                    except HTTPException as _hexc:
+                        failed.append({'name': final_name, 'error': _hexc.detail})
+                    except Exception as _e:
+                        import traceback as _tb
+                        failed.append({'name': final_name, 'error': f'{type(_e).__name__}: {_e}'})
+                else:
+                    try:
+                        from app.services.webdav_client import delete_file_webdav, list_files_webdav
+                        import requests as _requests
+                        webdav_target = target_dir if target_dir.startswith('http') else render_subfolder(rendered_root, sub_label)
+                        target_url = webdav_target.rstrip('/') + '/' + final_name
+                        if not target_url.startswith('http'):
+                            target_url = 'http://invalid' + target_url
+                        overwritten = False
+                        if overwrite_flag:
+                            ok_list, existing = list_files_webdav(cfg, webdav_target, project_name_hint=project_name)
+                            if ok_list and any(x.get('name') == final_name for x in existing):
+                                delete_file_webdav(cfg, target_url)
+                                overwritten = True
+                        # 关键:starlette 已把 UploadFile spool 到 SpooledTemporaryFile (内存上限 1MB, 超出写临时文件)。
+                        # seek(0) 后 requests.put(data=f.file) 会一次性 send 整个文件(带 Content-Length),
+                        # 内存恒定 1MB (取决于 SpooledTemporaryFile 的 max_size)。
+                        try:
+                            f.file.seek(0)
+                        except Exception:
+                            pass
+                        # 校验大小
+                        if f.size and f.size > max_size:
+                            raise HTTPException(413, detail=f'文件 {final_name!r} 超过单文件大小限制 ({max_size//1024//1024}MB)')
+                        bytes_sent = f.size or 0
+                        # 确保父目录
+                        from app.services.webdav_client import _ensure_parent_dir
+                        ok_pd, msg_pd = _ensure_parent_dir(target_url, cfg, timeout=15)
+                        if not ok_pd:
+                            failed.append({'name': final_name, 'error': f'父目录未就绪: {msg_pd}'})
+                        else:
+                            resp = _requests.put(
+                                target_url,
+                                data=f.file,
+                                auth=(cfg.webdav_username or '', cfg.webdav_password or ''),
+                                headers={
+                                    'User-Agent': 'channel-project-storage/1.0',
+                                    'Content-Type': 'application/octet-stream',
+                                },
+                                timeout=300,
+                                verify=False,
+                            )
+                            if 200 <= resp.status_code < 300:
+                                uploaded.append({
+                                    'name': final_name,
+                                    'path': target_url,
+                                    'size': bytes_sent,
+                                    'uploader': current_user.real_name or current_user.username,
+                                    'uploader_username': current_user.username,
+                                    'upload_time': int(datetime.now().timestamp()),
+                                    'overwritten': overwritten,
+                                })
+                            else:
+                                failed.append({'name': final_name, 'error': f'HTTP {resp.status_code}: {resp.text[:200]}'})
+                    except HTTPException as _hexc:
+                        failed.append({'name': final_name, 'error': _hexc.detail})
+                    except Exception as e:
+                        failed.append({'name': final_name, 'error': f'WebDAV 大文件上传错误: {e}'})
+            else:
+                # 小文件(<16MB):保持旧的 bytes 路径
+                content = _read_upload_streaming(f, max_size)
+                if cfg.mode == StorageMode.local:
+                    os.makedirs(target_dir, exist_ok=True)
+                    full_path = os.path.join(target_dir, final_name)
+                    if os.path.exists(full_path):
+                        if overwrite_flag:
+                            try:
+                                os.remove(full_path)
+                            except OSError:
+                                pass
+                        else:
+                            while os.path.exists(full_path):
+                                base, ext = os.path.splitext(safe_name)
+                                final_name = f'{base}_{counter}{ext}'
+                                full_path = os.path.join(target_dir, final_name)
+                                counter += 1
+                    try:
+                        with open(full_path, 'wb') as out:
+                            out.write(content)
+                        uploaded.append({
+                            'name': final_name,
+                            'path': full_path,
                             'size': len(content),
                             'uploader': current_user.real_name or current_user.username,
                             'uploader_username': current_user.username,
                             'upload_time': int(datetime.now().timestamp()),
-                            'overwritten': overwritten,
+                            'overwritten': overwrite_flag and final_name == safe_name,
                         })
-                    else:
-                        failed.append({'name': final_name, 'error': msg})
-                except Exception as e:
-                    failed.append({'name': final_name, 'error': f'WebDAV 错误: {e}'})
+                    except Exception as _e:
+                        import traceback as _tb
+                        failed.append({'name': final_name, 'error': f'{type(_e).__name__}: {_e} | dir w={os.access(target_dir, os.W_OK)} | exists={os.path.exists(full_path)} | cwd={os.getcwd()} | tb={_tb.format_exc()[:500]}'})
+                        raise
+                else:
+                    try:
+                        from app.services.webdav_client import upload_file, delete_file_webdav, list_files_webdav
+                        webdav_target = target_dir if target_dir.startswith('http') else render_subfolder(rendered_root, sub_label)
+                        target_url = webdav_target.rstrip('/') + '/' + final_name
+                        if not target_url.startswith('http'):
+                            target_url = 'http://invalid' + target_url
+                        overwritten = False
+                        if overwrite_flag:
+                            ok_list, existing = list_files_webdav(cfg, webdav_target, project_name_hint=project_name)
+                            if ok_list and any(x.get('name') == final_name for x in existing):
+                                delete_file_webdav(cfg, target_url)
+                                overwritten = True
+                        ok, msg = upload_file(cfg, target_url, content)
+                        if ok:
+                            uploaded.append({
+                                'name': final_name,
+                                'path': target_url,
+                                'size': len(content),
+                                'uploader': current_user.real_name or current_user.username,
+                                'uploader_username': current_user.username,
+                                'upload_time': int(datetime.now().timestamp()),
+                                'overwritten': overwritten,
+                            })
+                        else:
+                            failed.append({'name': final_name, 'error': msg})
+                    except Exception as e:
+                        failed.append({'name': final_name, 'error': f'WebDAV 错误: {e}'})
         except Exception as e:
             failed.append({'name': original, 'error': str(e)})
         finally:
