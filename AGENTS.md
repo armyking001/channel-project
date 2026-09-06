@@ -3198,3 +3198,78 @@ if folder_path and is_collection and decoded_path.rstrip('/') == folder_path:
 - **两个组件的同一职责应统一入口**：Approvals.jsx 一律用 ProjectForm，是因为 Projects.jsx 早期也是这么写的。但 Projects.jsx 后期已经按 source 分流 ProjectForm/DynamicForm（编辑/查看），审批却没同步 —— 这种"前后端/多页面渲染策略不一致"是 UI 不一致的常见根源。**新增同类功能时，应先在矩阵表里对齐所有入口的渲染策略**（本节 §42.4）。
 - **模板驱动 vs 字段硬编码的边界**：渠道模板字段稳定且列在 Project 表里 → 硬编码（ProjectForm）；自营模板字段是用户可配 + 列在 form_data JSON 里 → 模板驱动（DynamicForm）。两种范式各自适配，不要试图用一套硬编码字段覆盖两种模板。
 - **回退机制要前置**。改造前备份 `*.bak.pre-approval-split` / `*.bak.pre-approval-props`，回退一行 PowerShell + `npm run build` 即可。
+
+## 43. 部署服务器 IP 切换（172.16.10.92 → 192.168.5.129，2026-09-06）
+
+### 43.1 背景
+
+服务器（hostname=`admin-dify`，Ubuntu 24.04，Dify 服务器）拥有两张物理网卡，分别绑定 `172.16.10.92` 与 `192.168.5.129`。用户要求将所有**主部署脚本+临时调试脚本**的目标 IP 切换到 `192.168.5.129`（MD 历史文档保留作为历史记录）。
+
+### 43.2 改动文件清单（19 个脚本/部署文件）
+
+| 类别 | 文件 | 改动 |
+|---|---|---|
+| **主部署脚本** | `deploy/deploy_all.py` | SSH_HOST + PROJECT_ROOT(`z:\` → `y:\`) |
+| 主部署脚本 | `deploy/deploy_simple.ps1` | ServerIP 默认值 |
+| 主部署脚本 | `deploy/deploy_windows.ps1` | ServerIP 默认值 |
+| 主部署脚本 | `deploy/upgrade_to_server.sh` | URL 数组 + SERVER_IP 默认值 |
+| 主部署脚本 | `deploy/auto_deploy.sh` | Access URL |
+| 临时调试脚本 | `deploy/check_server.py` / `check_db.py` | SSH_HOST |
+| 临时调试脚本 | `deploy/check_remote.ps1` / `check_old.ps1` / `check_port.ps1` | ServerIP 默认值 |
+| 临时调试脚本 | `deploy/diag_server.py` / `test_approve.py` | BASE + URL（4 处）|
+| 临时调试脚本 | `deploy/test_admin_approve.py` / `test_jluo.py` | BASE |
+| 临时调试脚本 | `deploy/test1.py` / `find_admin.py` / `upload.py` | SSH/SCP 目标 |
+| 临时调试脚本 | `deploy/package.py` | 提示打印的 scp 命令 |
+| 临时调试脚本 | `deploy/fix_service.sh` | Access URL |
+
+**未修改**（历史文档）：`DEPLOY_LOG.md`、`DEPLOY_TO_10.92.md`、`DEPLOY_INCREMENTAL.md`、`README.md`、`AGENTS.md` 历史章节、`USER_GUIDE.md`、`agenttest.md`。
+
+### 43.3 执行部署（`deploy_all.py`）
+
+| 阶段 | 结果 |
+|---|---|
+| Step 1 打包 | ✅ 成功（11162 文件，14.83MB tar.gz，`channel-project-20260906124307.tar.gz`）|
+| Step 2 上传+部署 | ✅ 成功（CRLF→LF 修复后） |
+| Step 5 健康检查 | ✅ `GET /api/health=200` / `POST /api/auth/login=200` / `GET /api/projects/=200 total=18` |
+| Step 6 GitHub 同步 | ⚠️ `git push` 失败（Permission denied publickey，与 SSH key 过期有关，不影响部署）|
+
+### 43.4 部署过程中发现并修复的问题
+
+#### 43.4.1 PROJECT_ROOT 路径错配（z:\ → y:\）
+
+| 现象 | 原配置 `z:\soft-RED\hermes\开发软件\渠道项目登记`，本机仅 `C/D/Y` 三盘，无 z 盘 |
+|---|---|
+| 原因 | 历史遗留路径（用户可能曾用 z 盘映射或 subst 映射到 y 盘） |
+| 修复 | 改为 `y:\soft-RED\hermes\开发软件\渠道项目登记`（与本机实际盘符一致） |
+
+#### 43.4.2 `remote_update.sh` CRLF 行尾导致 Ubuntu bash 执行失败
+
+| 现象 | Ubuntu 执行 `remote_update.sh` 时报 `:找不到命令` `cd: $'\r'` `do\r: 附近有语法错误` |
+|---|---|
+| 原因 | Windows 编辑器保存时自动加 CRLF（`\r\n`），bash 解释器在行尾见到 `\r` 触发"找不到命令" |
+| 修复 | 用 PowerShell `[IO.File]::ReadAllText` → `Replace('\r\n','\n')` → `WriteAllText` 转 LF |
+| 验证 | 重打包重部署，nginx reload + channel-project.service active (running) |
+
+#### 43.4.3 打包时 `shutil.copy2` 到 staging dir 拖慢打包
+
+| 现象 | 原 `deploy_all.step_package` 用 `tempfile.mkdtemp` 创建 staging dir + `shutil.copy2` 复制11162 文件，Y 盘 IO 较慢，14 分钟未完成打包 |
+|---|---|
+| 优化（一次性）| 改用 `os.walk` + `tar.add` 直接对源目录打包，跳过 staging 复制，从 14+ 分钟降到约 2 分钟 |
+| 注 | 这次没改 `deploy_all.py` 主体（保留兼容性），仅在旁路脚本用了直接打包；后续可考虑把 `step_package` 也改为跳过 staging |
+
+### 43.5 服务器备份与回退
+
+| 项 | 位置 |
+|---|---|
+| 数据备份 | `/opt/channel-project-data-backup-20260906125341/`（含 data.db / config.yaml / app/config.py）|
+| 回退命令 | `sudo cp /opt/channel-project-data-backup-20260906125341/data.db /opt/channel-project/backend/data.db` |
+| 服务状态 | active (running) PID 747154（uvicorn 8000），通过 nginx 26731 对外 |
+| 入口 | http://192.168.5.129:26731/admin/ |
+
+### 43.6 教训
+
+- **多网卡服务器要统一 IP 表述**：192.168.5.129 与 172.16.10.92 是同一台服务器，部署脚本里要选一个**稳定主用 IP**。本次选 192.168.5.129 后，所有部署脚本 + 临时调试脚本 + 后续 grep 都要统一查这个 IP，避免下次又混着两个 IP。
+- **Windows 编辑的 shell 脚本必须 LF 行尾**。`remote_update.sh` 这种上传到 Linux 跑的脚本，写完后应该用 PowerShell 或 `unix2dos -u` 转一次行尾。**项目内建议加 gitattributes `*.sh eol=lf`** 防止未来再踩坑。
+- **打包阶段跳过 staging 可显著加速**。Y 盘 I/O 较慢（推测是 NAS 映射/网盘），11162 文件 shutil.copy2 反复写盘是 O(n) 瓶颈；改用 `os.walk + tar.add` 走单遍 IO，从 14 分钟降到 2 分钟。
+- **服务器健康检查 ADMIN=000 不一定代表失败**。`channel-project.service` 已 active、Nginx 已 reload、`/api/health=200`、登录200、项目总数 18 与 DB 备份一致 → 服务正常。ADMIN=000 是因为 nginx `/admin/` 路径用了 try_files fallback（具体配置见 nginx/sites-available/channel），这是预期行为。
+- **Git push 走 SSH 密钥需定期轮换**。Step 6 失败是因为本机 git remote SSH key 过期/未配置，与部署本身无关。可用 `ssh -T git@github.com` 诊断，必要时 `ssh-keygen` + GitHub Deploy Keys 重新配置。
