@@ -3273,3 +3273,12 @@ if folder_path and is_collection and decoded_path.rstrip('/') == folder_path:
 - **打包阶段跳过 staging 可显著加速**。Y 盘 I/O 较慢（推测是 NAS 映射/网盘），11162 文件 shutil.copy2 反复写盘是 O(n) 瓶颈；改用 `os.walk + tar.add` 走单遍 IO，从 14 分钟降到 2 分钟。
 - **服务器健康检查 ADMIN=000 不一定代表失败**。`channel-project.service` 已 active、Nginx 已 reload、`/api/health=200`、登录200、项目总数 18 与 DB 备份一致 → 服务正常。ADMIN=000 是因为 nginx `/admin/` 路径用了 try_files fallback（具体配置见 nginx/sites-available/channel），这是预期行为。
 - **Git push 走 SSH 密钥需定期轮换**。Step 6 失败是因为本机 git remote SSH key 过期/未配置，与部署本身无关。可用 `ssh -T git@github.com` 诊断，必要时 `ssh-keygen` + GitHub Deploy Keys 重新配置。
+
+### 43.7 SSH key 重建与 GitHub 推送（2026-09-06）
+
+- `C:\Users\admin\.ssh\` 之前没有 `id_rsa` / `id_ed25519` 私钥，只有 config / known_hosts → git push `Permission denied (publickey)`。
+- 新生成 ED25519：`ssh-keygen -t ed25519 -C "admin@channel-project-deploy" -f C:\Users\admin\.ssh\id_ed25519 -N ""`，公钥 `ssh-ed25519 AAAA...aUbW admin@channel-project-deploy`。
+- SSH config 追加 `Host github.com` 段（User git / IdentityFile id_ed25519 / IdentitiesOnly yes / PreferredAuthentications publickey），保证 `ssh -T git@github.com` 走指定 key。
+- 用户把公钥贴到 https://github.com/settings/keys → `STAR-14-deploy-ed25519-2026-09-06`。
+- `ssh -T git@github.com` → `Hi armyking001! You've successfully authenticated`。
+- 推送：`git add AGENTS.md && git commit -F msg.txt && git push origin feature/ai-agent` → `1417f21..ae4ba37 feature/ai-agent -> feature/ai-agent`，本地分支与 remote 一致。
