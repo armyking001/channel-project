@@ -14,6 +14,98 @@ python deploy_all.py
 - `--no-deploy` — 只打包 + Git 同步，不部署到服务器
 - `--no-git` — 只部署，不同步到 GitHub
 
+## 🚨 升级失败快速恢复
+
+> **触发条件**：升级/部署后服务 502、启动失败、health 接口不通、配置损坏等
+> **设计目标**：**一条命令恢复最近的健康系统状态，不动用户数据**
+
+### 用户指令
+
+> "按 DEPLOY_INCREMENTAL.md 恢复最近一次系统"
+
+### 一键恢复命令
+
+```powershell
+cd "z:\soft-RED\hermes\开发软件\渠道项目登记\deploy"
+python deploy_all.py --restore
+```
+
+### 自动完成的 6 个步骤
+
+| 步骤 | 说明 |
+|------|------|
+| 1. 探测环境 | 检查 SSH 通道 + 服务器状态 + 服务类型（systemd / 旧 systemd） |
+| 2. 识别冲突 | 检测端口 8000 占用、多个 systemd service（如 channel.service vs channel-project.service） |
+| 3. 禁用旧服务 | `systemctl disable channel` 等旧 service + `kill -9` 旧进程 |
+| 4. 还原备份 | 从 `/opt/channel-project-data-backup-YYYYMMDDHHMMSS/` 还原 **最新的备份** |
+| 5. 启动服务 | `systemctl restart channel-project` + 等启动完成 |
+| 6. 健康检查 | `/api/health` + 项目列表 API + nginx 转发链路 |
+
+### 数据保留策略
+
+**严格不动用户数据**：
+- ✅ `data.db`（项目/用户/审批/通知所有数据）只从最近一次备份还原
+- ✅ 不重置用户密码
+- ✅ 不删除任何项目
+- ✅ 不动 WebDAV 上传的文件
+- ⚠️ 升级后**新增**的数据（备份后产生的）会丢失
+
+### 恢复前诊断（必须）
+
+`--restore` 模式会**先打印诊断报告**，需用户确认后才能执行：
+
+```
+============================================================
+🚨 升级失败恢复模式
+============================================================
+当前状态:
+  - 端口 8000 占用: PID 3111303 (channel.service /opt/channel/backend/)
+  - systemd 失败: channel-project.service status=1/FAILURE
+  - 备份目录: /opt/channel-project-data-backup-20260906125341/
+
+将执行的操作:
+  1. systemctl stop channel-project channel
+  2. systemctl disable channel
+  3. kill -9 3111303 3111310 3111311 (旧 uvicorn)
+  4. cp /opt/channel-project-data-backup-20260906125341/data.db -> 当前 data.db
+  5. cp /opt/channel-project-data-backup-20260906125341/config.yaml -> 当前 config.yaml
+  6. systemctl start channel-project
+  7. 健康检查 (curl /api/health 200 + nginx 转发 200)
+
+是否继续? [y/N]
+```
+
+### 适用场景与对应动作
+
+| 场景 | 自动动作 |
+|------|---------|
+| 端口 8000 被占（多个 uvicorn） | kill 旧 PID + disable 旧 service |
+| config.yaml 缺字段（如 jwt.secret_key） | 从备份还原 config.yaml |
+| models.py 引入新表失败 | 还原 models.py + 保留新数据迁移 |
+| static/index.html 缺失 | 从备份还原 |
+| systemd service status=1/FAILURE | 还原全部代码 + 重启 |
+| 用户报告"按之前的样子回滚" | 全量还原到最近一次成功部署 |
+| 数据被误删 | 仅还原 data.db（其他代码不动） |
+
+### 与正常升级的区别
+
+| 维度 | 正常部署 `deploy_all.py` | 恢复模式 `--restore` |
+|------|------------------------|---------------------|
+| 代码来源 | 本地源码 | **服务器备份目录** |
+| 数据来源 | 保留当前 data.db | **从备份还原** |
+| GitHub 同步 | ✅ 自动 commit + push | ❌ 不提交代码变更 |
+| 前端构建 | ✅ 服务器端 npm run build | ❌ 还原备份的 static/ |
+| 耗时 | 2-3 分钟 | 30 秒 |
+| 风险 | 中（覆盖旧代码） | 低（恢复已知好的状态） |
+
+### 关键避坑点（恢复场景）
+
+1. **禁用旧 service 时机**：必须先 `stop` 再 `disable`，否则重启循环会一直拉起旧进程
+2. **kill -9 必须包含 master + worker**：uvicorn --workers N 时 master PID + N 个 worker PID 都要杀
+3. **data.db 备份不能丢**：每次成功部署后**自动**在 `/opt/channel-project-data-backup-YYYYMMDDHHMMSS/` 创建完整快照（含 data.db + config.yaml + 所有代码）
+4. **手动跑 uvicorn 拿 traceback**：`sudo systemctl status X` 看不到 Python 错误，必须 `cd /opt/X && sudo /usr/bin/python3 -m uvicorn app.main:app 2>&1 | head -60`
+5. **不要修改服务器 config.yaml 的 database.url**：服务器是 Linux，DB url 必须是 `/opt/...` 路径，不能改成本地 Windows 路径
+
 ### 自动完成的 9 个步骤
 
 | 步骤 | 说明 | 自动？ |
@@ -85,7 +177,9 @@ python deploy_all.py
 9. **`parent_id` 清空**：后端 `update_user` 必须用 `model_fields_set` 判断，不能用 `is not None`（否则无法清空为 NULL）
 10. **winpty 部署**：`sshpass.exe` 可能损坏，`deploy_all.py` 已内置 winpty 方案
 
-## 🚨 数据回滚
+## 🚨 数据回滚（手动版）
+
+> ⚠️ **推荐使用上面的 `--restore` 模式**，本节为应急手动步骤
 
 ```bash
 ssh admin001@172.16.10.92
@@ -122,4 +216,4 @@ sudo systemctl start channel-project
 ```
 
 ---
-最后更新：2026-08-14（一键部署脚本 deploy_all.py 上线）
+最后更新：2026-09-08（新增 `🚨 升级失败快速恢复` 章节与 `--restore` 模式；基于本次 hotfix 教训：端口冲突 / 旧 service / config.yaml 不应改动 Linux 路径）

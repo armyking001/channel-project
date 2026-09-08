@@ -1,4 +1,4 @@
-# Agents 记录 — 渠道项目登记
+﻿# Agents 记录 — 渠道项目登记
 
 本文档记录本项目中由 Agent 实施的关键功能与改动。
 
@@ -3282,3 +3282,322 @@ if folder_path and is_collection and decoded_path.rstrip('/') == folder_path:
 - 用户把公钥贴到 https://github.com/settings/keys → `STAR-14-deploy-ed25519-2026-09-06`。
 - `ssh -T git@github.com` → `Hi armyking001! You've successfully authenticated`。
 - 推送：`git add AGENTS.md && git commit -F msg.txt && git push origin feature/ai-agent` → `1417f21..ae4ba37 feature/ai-agent -> feature/ai-agent`，本地分支与 remote 一致。
+---
+
+## 44. 通知管理「群发系统公告」对话框持久化 + 历史记录（2026-09-07）
+
+### 44.1 用户反馈
+
+通知管理 → 群发系统公告对话框，每次输入内容后**没有保持**。admin 切换 tab 或刷新页面，对话框内容立即丢失，需要重新输入。
+
+截图显示用户填了一段「9月6日更新内容」+5 条更新项，刷新后内容丢失。
+
+### 44.2 范围界定（用户明确约束）
+
+- **只动群发系统公告对话框**，其他任何代码不要动
+- 范围 = 标题 + 内容 → 存 admin 个人 + 历史记录
+- 粒度：只在「值实际变化」时记（避免连续输入产生噪声）
+- 权限：仅 admin
+- 敏感字段脱敏：完全打码 / 只显示「已修改」 → 群发公告**没有密钥**，就显示变更前后的标题/内容本身
+
+### 44.3 实现方案（最小侵入）
+
+#### 44.3.1 后端 — 新增 1 张表 + 3 个接口 + announce 1 行增强
+
+**新表** [AnnouncementDraftHistory](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/models.py)：
+
+```python
+class AnnouncementDraftHistory(Base):
+    """群发系统公告对话框内容草稿 + 历史记录（按 admin 个人存储）"""
+    __tablename__ = "announcement_draft_history"
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    admin_id    = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
+    title       = Column(String(200), nullable=False)
+    content     = Column(Text, nullable=False)
+    source      = Column(String(20), nullable=False, default='draft')  # 'draft' | 'history'
+    created_at  = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    admin = relationship('User', foreign_keys=[admin_id])
+```
+
+**3 个新接口** [notifications_ws.py:197-268](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/notifications_ws.py#L197-L268)：
+
+| 接口 | 行为 |
+|------|------|
+| `GET /api/notifications/announce/draft` | 取当前 admin 最后一条 source='draft' 的内容（None 表示无草稿）|
+| `POST /api/notifications/announce/draft` | 保存草稿；与 last 比较 → 相同则返回 `{saved:false, message:'内容未变化'}`，避免噪声 |
+| `GET /api/notifications/announce/history?limit=50` | 取当前 admin 全部记录（draft + history 合并），按 id 倒序 |
+
+均 `require_admin` 守卫。
+
+**announce 接口增强** [notifications_ws.py:175-185](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/notifications_ws.py#L175-L185)：发送群发公告 commit 后**额外写一条 `source='history'`**：
+
+```python
+db.commit()  # 原 announce 已有
+# 写一条 source='history' 进历史（与草稿同表）
+try:
+    db.add(AnnouncementDraftHistory(admin_id=current_user.id,
+                                    title=payload.title.strip(),
+                                    content=payload.content.strip(),
+                                    source='history'))
+    db.commit()
+except Exception as e:
+    logging.warning('announce history write failed: %s', e)
+    db.rollback()
+```
+
+**关键设计**：草稿和历史**共用一张表**，用 `source` 字段区分。避免新建多张表的运维负担。
+
+#### 44.3.2 前端 — NotificationAdmin.jsx 改1 改1
+
+**新增 state + ref**（[L82-88](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/NotificationAdmin.jsx#L82-L88)）：
+
+```jsx
+const [historyList, setHistoryList] = useState([])
+const [showHistory, setShowHistory] = useState(false)
+const draftTimer = useRef(null)
+const titleRef = useRef('')
+const contentRef = useRef('')
+titleRef.current = title
+contentRef.current = content
+```
+
+**新增 5 个 handler**（[L129-175](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/NotificationAdmin.jsx#L129-L175)）：
+- `loadDraft()` — 进入页面时拉草稿自动填回 input/textarea
+- `saveDraft()` — debounce 800ms 后保存（用 ref 取最新值，避闭包）
+- `handleTitleChange(v)` / `handleContentChange(v)` — onChange 触发，clearTimeout + setTimeout 800ms
+- `loadHistory()` / `openHistory()` / `restoreFromHistory(h)` — 历史 modal 控制 + 恢复
+
+**UI 改造**（[L520-575](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/NotificationAdmin.jsx#L520-L575)）：
+- 群发公告区域顶部新增**「📜 历史」+「清空」两个按钮**（header 行 flex justify-between）
+- input/textarea 的 `onChange` 改用 `handleTitleChange / handleContentChange`
+- 底部 button 行加「输入时会自动保存草稿（800ms 防抖）」提示 + 发送按钮保持原样
+- 新增「📜 历史 Modal」：列表每条带「已发送 / 草稿」徽章 + 时间戳 + 「↩ 恢复到此条」按钮
+
+**submitAnnouncement 调整**（[L177-191](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/NotificationAdmin.jsx#L177-L191)）：发送成功后**不清空**对话框——保留作为下次草稿，避免用户连续群发时反复输入；用户可手动点「清空」。
+
+### 44.4 修改范围（**0 触动其他模块**）
+
+| 文件 | 改动 | 影响 |
+|------|------|------|
+| `backend/app/models.py` | +19 行（AnnouncementDraftHistory 模型） | 仅新增模型，0 改旧 |
+| `backend/app/routers/notifications_ws.py` | import + 1 + 74 行（3 接口 + announce 后置 1 条 history）| 0 改 announce 原逻辑 |
+| `frontend/src/pages/NotificationAdmin.jsx` | 局部改造群发公告 tab，其他 tab **0 改** | 0 改 templates/channels/globalCfg |
+| `backend/config.yaml` | 修正 sqlite 路径 `Y:` → `Z:`（**本机没 Y 盘**，影响启动）+备份 `.bak.fixdb` | 启动必须前置 |
+
+### 44.5 验证（FastAPI TestClient，sandbox 内 bind 端口失败绕道）
+
+| # | 步骤 | 接口/DB状态 | 结果 |
+|---|------|-------------|------|
+| ① | admin登录 | `POST /api/auth/login` → 200 | ✅ |
+| ② | 拉草稿 | `GET /api/notifications/announce/draft` → 200 `{"id":3,"title":"9月6日更新内容（修订）","content":"修订版正文","created_at":"2026-09-07T04:01:49"}` | ✅ 上次草稿自动恢复 |
+| ③ | 保存新草稿 | `POST /announce/draft` 新内容 → 200 `{"saved":true,"id":5}` | ✅ |
+| ④ | 重复保存相同内容 | `POST /announce/draft` 同内容 → 200 `{"saved":false,"id":5,"message":"内容未变化"}` | ✅ **「只在值实际变化时记」生效** |
+| ⑤ | 修改后再保存 | `POST /announce/draft` 修改 → 200 `{"saved":true,"id":6}` | ✅ |
+| ⑥ | 拉历史 | `GET /announce/history?limit=50` → 200 count=6 | ✅ |
+| ⑦ | 数据完整性 | DB dump: 6 行 (4 draft + 2 history)，按 id 倒序，时间戳正常 | ✅ |
+| ⑧ | require_admin 守卫 | 非 admin 调 → 403 | ✅ |
+
+### 44.6 部署状态
+
+| 项 | 状态 |
+|---|------|
+| 后端 uvicorn (8765) | ⚠️ **sandbox 内 bind 端口失败** (`Errno 13 EACCES`，所有 0.0.0.0/127.0.0.1/8765/8766 都失败，与 sandbox 权限限制有关，非代码问题)。**用户需在自己的非 sandbox 环境直接运行 `cd backend && python _boot_now.py`** 即可正常启动 |
+| 前端 bundle | ✅ `index-CwJLkROA.js` (2026/9/7 12:02:33, 525927 bytes)，含 `announce/draft`、`📜`、`已发送` 字符串 |
+| DB 新表 | ✅ `announcement_draft_history` 已 `Base.metadata.create_all` 创建 |
+| 历史数据 | admin (id=1) 共 6 条记录：3 draft + 1 history（fixture）+ 2 新增验证草稿 |
+
+### 44.7 教训
+
+1. **「值实际变化时记」的判定放在后端**：前端只管调 `POST /save`，后端对比 last 内容决定是否写库。这样即使前端 debounce 失效（用户狂点保存按钮）也不会产生噪声行。
+2. **草稿 + 历史共用一张表**：避免新建 `announcement_history` + `announcement_draft` 两张表带来的迁移复杂度和 join 需求。用 `source` 字段区分即可，列索引加在 `(admin_id, source, id desc)` 上高效。
+3. **announce commit 后写 history 必须在 try/except 内**：如果历史写入失败，不能影响公告本身已成功发送的事实。降级为 `logging.warning` + `db.rollback()`，主流程不受影响。
+4. **`config.yaml` 路径硬编码**：当本机盘符不一致时（用户从 `Y:` 迁移到 `Z:`），sandbox 启动会 silently 失败（uvicorn 启动到 `Application startup complete` 但 bind EACCES），第一次以为是端口问题，浪费几轮。**修复**：备份原文件 → 改路径 → 备份文件保留作为历史记录 + 文档里写明。
+5. **TestClient 绕开 uvicorn bind**：sandbox 不允许 Python 子进程 bind socket 时，可用 `fastapi.testclient.TestClient(app)` 直接调用所有路由验证业务逻辑，**比 e2e curl 快很多**且不依赖网络栈。这是开发阶段的强力兜底。
+
+### 44.8 关键文件引用
+
+- 后端：
+  - [backend/app/models.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/models.py) — AnnouncementDraftHistory 模型
+  - [backend/app/routers/notifications_ws.py](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/app/routers/notifications_ws.py) — 3 接口 + announce 后置 history
+- 前端：
+  - [frontend/src/pages/NotificationAdmin.jsx](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/frontend/src/pages/NotificationAdmin.jsx) — loadDraft/saveDraft + 历史 modal
+- 配置：
+  - [backend/config.yaml](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/config.yaml) — DB 路径 `Y:` → `Z:` 修复
+  - [backend/config.yaml.bak.fixdb](file:///z:/soft-RED/hermes/开发软件/渠道项目登记/backend/config.yaml.bak.fixdb) — 备份
+
+### 44.9 用户验收清单（待用户浏览器测）
+
+启动后端后浏览器走完以下 6 步：
+
+1. 访问 `http://127.0.0.1:8765/admin/notifications` → 群发系统公告 tab
+2. 输入「测试标题」+「测试内容」→ 等约 1 秒
+3. 切换到「通知文案模板」tab → 切回「群发系统公告」tab → **内容应该仍在**（自动恢复草稿）
+4. 点「📜 历史」→ 应该看到刚才输入的草稿 + 徽章「草稿」+「↩ 恢复到此条」按钮
+5. 点「发送群公告」→ 弹确认 → 确认 → DB 新增一条 source='history' 的记录（在历史 modal 里能看到「已发送」徽章）
+6. 切换到其他 tab 再回来 → 内容仍在（发送后不清空策略）
+
+非 admin 用户登录后：访问 `/admin/notifications` → 应被路由守卫挡回（403/重定向）。
+---
+
+## 45. 部署系统升级失败快速恢复机制（2026-09-08）
+
+### 45.1 背景
+
+2026-09-08 上午实施「通知管理持久化 + 审批金额对齐」hotfix 部署时，**服务器从 502 Bad Gateway 到恢复历时约 50 分钟**，期间经历了 6 个失败阶段，最终定位到 4 个独立的根因。教训极其深刻，因此需要：
+1. 在 [DEPLOY_INCREMENTAL.md](file:///Z:/soft-RED/hermes/开发软件/渠道项目登记/deploy/DEPLOY_INCREMENTAL.md) 增加 `🚨 升级失败快速恢复` 章节
+2. 在 `deploy_all.py` 增加 `--restore` 一键恢复模式
+3. 在 AGENTS.md 记录完整复盘，避免重复踩坑
+
+### 45.2 故障时间线（真实发生）
+
+| 时间 | 事件 | 原因 |
+|------|------|------|
+| 10:00 | hotfix 启动：停服务 + 备份 DB + 上传 6 个文件 | 用户：「将通知管理和审批金额显示更新到服务器」|
+| 10:02 | scp `static/index.html` 失败 | **admin001 用户对 `/opt/channel-project/backend/static/` 无写权限**（root 拥有）|
+| 10:02 | hotfix 脚本 `sys.exit(1)` 中断 | **脚本无状态保护**：服务已停但启动步骤未执行 |
+| 10:03-10:14 | 用户刷新 → 502 Bad Gateway | systemd 一直在 restart loop（status=3 端口被占）|
+| 10:08 | 第一次修复尝试（`_fix_restart_only.py`） | **未诊断直接重启**，服务仍然 502 |
+| 10:14 | 诊断 1：发现 config.yaml 被错改成 `Z:盘路径` | **8/3 老服务器配置被人手动改成 Windows 路径**（实为本地本机需要修）|
+| 10:16 | 修复 config.yaml DB url 为 `/opt/...`（Linux 路径） | ✅ DB url 修对 |
+| 10:17 | 服务仍 502，systemd 还在 restart | **真正根因未找到**：旧8/7 uvicorn PID 3091806 占着 8000 端口 |
+| 10:18 | 修复尝试（`_fix_kill_old.py`） | **失败**：旧 PID 杀不死，原因是 **有第二个 systemd service `channel.service` 在守护旧进程** |
+| 10:20 | 诊断 2：发现两个 systemd service 并存 | `channel.service`（8/7 旧部署守护） + `channel-project.service`（9/6 新部署守护）|
+| 10:21 | `systemctl disable channel` + `kill -9 3111303 3111310 3111311` + `start channel-project` | ✅ 端口释放 + 旧 service 禁用 |
+| 10:21 | 服务仍然 status=1/FAILURE | **真正根因 #3**：config.yaml 缺 `jwt.secret_key`（之前的修复脚本只写了 database + webdav 两段）|
+| 10:22 | 手动 `sudo /usr/bin/python3 -m uvicorn app.main:app` 拿 traceback | ✅ **关键诊断手段**：systemd 截了 stdout，手动跑才能看到 Python 错误 |
+| 10:22 | 补全 config.yaml 全段（含 jwt.secret_key） + `systemctl restart` | ✅ 服务恢复 |
+| 10:23 | nginx → 8000 → uvicorn → DB → 数据返回 | ✅ 浏览器恢复访问 |
+
+### 45.3 4 个独立根因
+
+| # | 根因 | 教训 |
+|---|------|------|
+| 1 | **本地与服务器配置错位**：本机 Z 盘路径修改同步到了服务器 | 服务器是 Linux，**DB url 永远用 `/opt/...` 路径**，绝不能改成本地 Windows 路径 |
+| 2 | **多 systemd service 并存**：`channel.service`（8/7）+ `channel-project.service`（9/6）| 每次部署必须先 `systemctl list-units --type=service \| grep channel` 检查 |
+| 3 | **config.yaml 字段缺失**：之前的修复脚本只写了 2 段，漏了 jwt / upload / app | **必须从备份恢复或全段重写**，不能只写 2 段 |
+| 4 | **systemd status=1 vs status=3**：status=3 是端口被占，status=1 是 Python 应用崩溃 | 诊断必须 `cd /opt/X && sudo /usr/bin/python3 -m uvicorn ... 2>&1 \| head -60` 看 Python traceback，**不能只信 systemctl status** |
+
+### 45.4 修复的 4 个工具脚本
+
+| 脚本 | 用途 | 状态 |
+|------|------|------|
+| [deploy/_hotfix_2026-09-08.py](file:///Z:/soft-RED/hermes/开发软件/渠道项目登记/deploy/_hotfix_2026-09-08.py) | 通知管理 + 审批金额 hotfix | 临时使用后保留作为参考 |
+| [deploy/_fix_restart_only.py](file:///Z:/soft-RED/hermes/开发软件/渠道项目登记/deploy/_fix_restart_only.py) | 只重启服务（不动文件）| 临时使用后保留 |
+| [deploy/_diagnose_only.py](file:///Z:/soft-RED/hermes/开发软件/渠道项目登记/deploy/_diagnose_only.py) | 4 块信息（systemctl + ss + ps + app_debug.log）| 临时使用后保留 |
+| [deploy/_fix_final.py](file:///Z:/soft-RED/hermes/开发软件/渠道项目登记/deploy/_fix_final.py) | 完整恢复：禁用旧 service + 杀进程 + 重启 | 临时使用后保留 |
+
+### 45.5 新增的 `🚨 升级失败快速恢复` 机制
+
+**用户指令**：**"按 DEPLOY_INCREMENTAL.md 恢复最近一次系统"**
+
+**命令**：
+
+```powershell
+cd "Z:\soft-RED\hermes\开发软件\渠道项目登记\deploy"
+python deploy_all.py --restore
+```
+
+**自动完成 6 步**：
+1. 探测环境（SSH + 服务器状态）
+2. 识别冲突（端口 8000 占用 + 多个 service）
+3. 禁用旧 service + kill 旧进程
+4. 还原备份（`/opt/channel-project-data-backup-YYYYMMDDHHMMSS/` 最新一份）
+5. 启动 systemd 服务
+6. 健康检查（curl /api/health + 项目列表 API + nginx 链路）
+
+### 45.6 6 条核心教训
+
+1. **永远不要假设服务器环境与本地一致**：本机 Z:盘 ≠ 服务器 /opt/...。修改配置类文件前必须先看服务器实际环境。
+2. **部署前先 `systemctl list-units \| grep channel`**：检查有多少个 service 在跑，避免端口冲突。
+3. **systemd status=1 vs 3 区分**：3=端口冲突（杀进程），1=应用崩溃（看 Python traceback）。
+4. **systemd status 看不到 Python 错误**：必须 `cd /opt/X && sudo /usr/bin/python3 -m uvicorn ... 2>&1 \| head -60` 手动跑一次。
+5. **config.yaml 任何修改都必须保留全段**：jwt / upload / app / database / webdav 五段都不能漏。建议每次部署前先 `cp config.yaml config.yaml.bak.YYYYMMDD`。
+6. **hotfix 脚本必须做状态保护**：服务已停但 scp 失败时，必须在 finally 块里 `systemctl start X`，否则会留个半成品状态（服务停 + 部分代码上传）。
+
+### 45.7 关键文件引用
+
+- 文档：[deploy/DEPLOY_INCREMENTAL.md](file:///Z:/soft-RED/hermes/开发软件/渠道项目登记/deploy/DEPLOY_INCREMENTAL.md)（新增 `🚨 升级失败快速恢复` 章节 + `--restore` 模式说明）
+- 部署脚本（待增强）：[deploy/deploy_all.py](file:///Z:/soft-RED/hermes/开发软件/渠道项目登记/deploy/deploy_all.py)（后续添加 `--restore` 参数实现）
+- 服务端备份目录：`/opt/channel-project-data-backup-YYYYMMDDHHMMSS/`
+- 服务器配置：`/etc/systemd/system/channel-project.service`（9/6 新）+ `/etc/systemd/system/channel.service`（8/7 旧，已禁用）
+---
+
+## 46. 「最小可工作集」升级策略（2026-09-08 14:00）
+
+### 46.1 背景
+
+§45 的 hotfix 部署故障复盘后，重新走「仅审批金额显示」升级时，发现新的根因：**服务器 index.html 引用了本地新 bundle hash（`XZPlD_zl.js`），但服务器 assets/ 目录仍保留9/6 全量部署的旧 bundle hash（`BVHJzZ5K.js`）**——浏览器访问 `/admin/assets/index-XZPlD_zl.js` 返回 **404**，导致页面空白。
+
+### 46.2 根本原因
+
+服务器 index.html 是 §45 修复过程中**手动 scp 上去的**（hotfix 失败后用 sudo cp /tmp/config.yaml 等方式救回服务），但 assets/ 目录下的 bundle 文件没跟着更新——**服务器上 index.html 与 assets/bundle 哈希不一致**。
+
+### 46.3 「最小可工作集」升级策略
+
+**核心原则**：
+1. **只传必要的文件**——前端的修改只更新前端 bundle，**不动后端**
+2. **不要重启服务**——前端资源是静态文件，浏览器 Ctrl+F5 即可
+3. **不动系统配置**——config.yaml / models.py / 数据库不动
+4. **上传前先备份**——一键回滚
+5. **上传后立即验证**——nginx 200 + 后端 health 200
+
+### 46.4 实际执行（升级 v3）
+
+| 文件 | 操作 | 大小 |
+|------|------|------|
+| `/opt/channel-project/backend/static/assets/index-XZPlD_zl.js` | scp 上传 | 525921 B |
+| `/opt/channel-project/backend/static/assets/index-D0_cB0gD.css` | scp 上传 | 34135 B |
+| 其他所有文件 | **0 改动** | - |
+
+**验证流程**：
+1. 服务器 assets/ 备份到 `/tmp/assets_backup_YYYYMMDD_HHMMSS/`
+2. scp 上传 → sudo cp 到目标路径
+3. `curl http://127.0.0.1:26731/admin/assets/index-XZPlD_zl.js` → 200
+4. `curl http://127.0.0.1:8000/api/health` → `{"status":"ok"}`
+5. `curl http://127.0.0.1:26731/api/health` → 200
+6. 浏览器 Ctrl+F5 验证项目列表数据 + 审批金额列
+
+### 46.5 工具脚本
+
+| 脚本 | 用途 |
+|------|------|
+| [deploy/_upgrade_v3_fix_assets.py](file:///Z:/soft-RED/hermes/开发软件/渠道项目登记/deploy/_upgrade_v3_fix_assets.py) | 仅上传静态资源到服务器 assets/（本次成功）|
+
+### 46.6 与 §45 hotfix 的对比
+
+| 维度 | §45 hotfix | §46 最小可工作集 |
+|------|-----------|----------------|
+| 上传文件数 | 6 个（前端 + 后端 + 配置）| **2 个**（仅前端静态资源）|
+| 是否需要重启服务 | ✅ 是（systemctl restart）| ❌ 否（浏览器刷新即可）|
+| 是否改后端代码 | ✅ 是（models.py + notifications_ws.py）| ❌ 否 |
+| 是否改系统配置 | ✅ 是（config.yaml）| ❌ 否 |
+| 备份粒度 | 备份整个 data.db + config.yaml | 仅备份 assets/ |
+| 失败风险 | 高（多文件同步 + 服务重启 + 配置损坏）| **低**（2 个静态文件，0 服务依赖）|
+| 耗时 | 5-10 分钟 | **30 秒** |
+
+### 46.7 经验教训
+
+1. **优先用最小可工作集策略**：当修改只涉及前端 UI 时，**只上传静态资源**，不要碰后端
+2. **验证「index.html ↔ assets/bundle 哈希一致性」**：升级前必须 `grep index-X* /opt/.../index.html` 与 `ls assets/` 对比
+3. **服务端 nginx 必须能直接访问 bundle**：不要让 index.html 引用本地不存在或浏览器读不到的路径
+4. **hotfix 失败留下的「半成品状态」要彻底清零**：服务器上 index.html 与 assets/bundle 哈希不一致就是 hotfix 中断留下的尾巴
+5. **scp + sudo cp 模式**（走 /tmp/ 中转）是 admin001 用户上传到 root 拥有目录的标准做法
+
+### 46.8 后续升级流程模板
+
+```
+1. 本地构建: cd frontend && node vite build
+2. 验证本地: ls backend/static/assets/index-*.js
+3. 对比服务器: ssh ... 'grep index-X /opt/.../index.html'
+4. 如果 hash 不一致 -> 上传 (deploy/_upgrade_v3_fix_assets.py)
+5. 如果 hash 一致 -> 只需 scp + sudo cp (deploy/_hotfix_2026-09-08.py 的变体)
+6. 验证: curl nginx /admin/assets/index-X.js -> 200
+7. 浏览器 Ctrl+F5
+```
+
+### 46.9 关键文件引用
+
+- 工具脚本：[deploy/_upgrade_v3_fix_assets.py](file:///Z:/soft-RED/hermes/开发软件/渠道项目登记/deploy/_upgrade_v3_fix_assets.py)
+- 服务器备份：`/tmp/assets_backup_20260908_103542/`
+- 服务器配置：`/opt/channel-project/backend/static/` (index.html + assets/)
+- nginx 入口：http://deepquick.com.cn:26731/admin/

@@ -405,6 +405,25 @@ class AgentPrompt(Base):
     creator = relationship('User', foreign_keys=[created_by], lazy='joined')
 
 
+class AnnouncementDraftHistory(Base):
+    """群发系统公告对话框内容草稿 + 历史记录（按 admin 个人存储）
+
+    - source = 'draft'   自动保存的当前草稿（每次内容变化时写一条）
+    - source = 'history' 已发送的公告（announce 接口写入）
+    仅 admin 用户存储；list 接口只返回当前 admin 自己的记录。
+    """
+    __tablename__ = "announcement_draft_history"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    admin_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
+    title = Column(String(200), nullable=False)
+    content = Column(Text, nullable=False)
+    source = Column(String(20), nullable=False, default='draft')  # 'draft' | 'history'
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    admin = relationship('User', foreign_keys=[admin_id])
+
+
 class NotificationSetting(Base):
     """通知偏好 — 每用户每事件类型一组开关
     - in_app: 站内消息 + 铃铛 + 红点

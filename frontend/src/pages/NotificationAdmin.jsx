@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   sendAnnouncement,
   listNotificationChannels,
@@ -77,6 +77,13 @@ export default function NotificationAdmin() {
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
   const [sending, setSending] = useState(false)
+  const [historyList, setHistoryList] = useState([])
+  const [showHistory, setShowHistory] = useState(false)
+  const draftTimer = useRef(null)
+  const titleRef = useRef('')
+  const contentRef = useRef('')
+  titleRef.current = title
+  contentRef.current = content
   const [channels, setChannels] = useState([])
   const [edit, setEdit] = useState(null)
   const [templates, setTemplates] = useState([])
@@ -118,7 +125,54 @@ export default function NotificationAdmin() {
     }
   }
 
-  useEffect(() => { load(); loadTpls(); loadGlobalCfg() }, [])
+  useEffect(() => { load(); loadTpls(); loadGlobalCfg(); loadDraft() }, [])
+
+  const loadDraft = async () => {
+    try {
+      const r = await api.get('/api/notifications/announce/draft')
+      if (r.data) {
+        setTitle(r.data.title || '')
+        setContent(r.data.content || '')
+      }
+    } catch (_) { /* 草稿为空时 200 null, 报错吞掉 */ }
+  }
+
+  const saveDraft = async () => {
+    const t = titleRef.current
+    const c = contentRef.current
+    if (!t.trim() && !c.trim()) return
+    try {
+      await api.post('/api/notifications/announce/draft', { title: t, content: c })
+    } catch (_) {}
+  }
+
+  const handleTitleChange = (v) => {
+    setTitle(v)
+    if (draftTimer.current) clearTimeout(draftTimer.current)
+    draftTimer.current = setTimeout(saveDraft, 800)
+  }
+  const handleContentChange = (v) => {
+    setContent(v)
+    if (draftTimer.current) clearTimeout(draftTimer.current)
+    draftTimer.current = setTimeout(saveDraft, 800)
+  }
+
+  const loadHistory = async () => {
+    try {
+      const r = await api.get('/api/notifications/announce/history?limit=50')
+      setHistoryList(r.data || [])
+    } catch (e) {
+      alert('加载历史失败: ' + (e && e.message))
+    }
+  }
+  const openHistory = async () => {
+    await loadHistory()
+    setShowHistory(true)
+  }
+  const restoreFromHistory = (h) => {
+    setTitle(h.title); setContent(h.content)
+    setShowHistory(false)
+  }
 
   const submitAnnouncement = async () => {
     if (!title.trim() || !content.trim()) { alert('标题和内容不能为空'); return }
@@ -127,7 +181,9 @@ export default function NotificationAdmin() {
     try {
       const r = await sendAnnouncement({ title: title.trim(), content: content.trim() })
       alert(r.data.message)
-      setTitle(''); setContent('')
+      // 发送后不清空——保留作为下一次草稿,可在历史里也能再看到
+      // 但为了避免下次又立刻点发送造成误群发,这里给个明显的可清空提示
+      // 用户可以手动点击「清空」按钮
     } catch (e) {
       alert('发送失败: ' + (e && e.response && e.response.data && e.response.data.detail || e.message))
     }
@@ -424,28 +480,88 @@ export default function NotificationAdmin() {
       {/* 群发公告 */}
       {tab === 'ann' && (
         <div className="bg-white border border-gray-200 rounded-lg p-5">
-          <h3 className="font-semibold text-lg mb-3">📢 群发系统公告</h3>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="font-semibold text-lg">📢 群发系统公告</h3>
+            <div className="flex gap-2">
+              <button
+                onClick={openHistory}
+                className="px-3 py-1 text-sm border border-gray-300 rounded text-gray-700 hover:bg-gray-50"
+              >
+                📜 历史
+              </button>
+              <button
+                onClick={() => { setTitle(''); setContent('') }}
+                className="px-3 py-1 text-sm border border-gray-300 rounded text-gray-500 hover:bg-gray-50"
+                disabled={!title && !content}
+              >
+                清空
+              </button>
+            </div>
+          </div>
           <div className="space-y-3">
             <input
               className="w-full border border-gray-300 rounded px-3 py-2"
               placeholder="公告标题"
               value={title}
-              onChange={e => setTitle(e.target.value)}
+              onChange={e => handleTitleChange(e.target.value)}
               maxLength={200}
             />
             <textarea
               className="w-full border border-gray-300 rounded px-3 py-2 h-32"
               placeholder="公告内容(支持换行)"
               value={content}
-              onChange={e => setContent(e.target.value)}
+              onChange={e => handleContentChange(e.target.value)}
             />
-            <button
-              onClick={submitAnnouncement}
-              disabled={sending}
-              className={"px-4 py-2 rounded text-white " + (sending ? 'bg-gray-400' : 'bg-blue-500 hover:bg-blue-600')}
-            >
-              {sending ? '发送中...' : '发送群公告'}
-            </button>
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-gray-400">输入时会自动保存草稿（800ms 防抖）</span>
+              <button
+                onClick={submitAnnouncement}
+                disabled={sending}
+                className={"px-4 py-2 rounded text-white " + (sending ? 'bg-gray-400' : 'bg-blue-500 hover:bg-blue-600')}
+              >
+                {sending ? '发送中...' : '发送群公告'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 历史 Modal */}
+      {showHistory && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setShowHistory(false)}>
+          <div className="bg-white rounded-lg shadow-2xl max-h-[80vh] overflow-auto w-[700px] max-w-[95vw] p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-semibold text-lg">📜 群发公告历史记录</h3>
+              <button onClick={() => setShowHistory(false)} className="text-gray-400 hover:text-gray-700 text-xl">×</button>
+            </div>
+            {historyList.length === 0 ? (
+              <div className="text-center text-gray-400 py-8">暂无历史记录</div>
+            ) : (
+              <div className="space-y-2">
+                {historyList.map(h => (
+                  <div key={h.id} className="border border-gray-200 rounded-lg p-3 hover:bg-gray-50">
+                    <div className="flex items-start justify-between mb-1">
+                      <div className="flex items-center gap-2">
+                        <span className={'px-2 py-0.5 text-xs rounded ' + (h.source === 'history' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600')}>
+                          {h.source === 'history' ? '已发送' : '草稿'}
+                        </span>
+                        <span className="text-sm font-medium text-gray-800 truncate">{h.title || '(无标题)'}</span>
+                      </div>
+                      <span className="text-xs text-gray-400 whitespace-nowrap ml-2">
+                        {h.created_at ? new Date(h.created_at).toLocaleString() : ''}
+                      </span>
+                    </div>
+                    <div className="text-xs text-gray-600 whitespace-pre-wrap break-all mb-2">{h.content}</div>
+                    <button
+                      onClick={() => restoreFromHistory(h)}
+                      className="text-xs px-2 py-1 border border-blue-300 text-blue-600 rounded hover:bg-blue-50"
+                    >
+                      ↩ 恢复到此条
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}

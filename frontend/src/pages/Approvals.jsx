@@ -248,7 +248,7 @@ const submitReject = async () => {
                   </td>
                   <td className="px-3 py-2 font-mono text-xs">{p.project_code}</td>
                   <td className="px-3 py-2">{p.responsible_sales || '-'}</td>
-                  <td className="px-3 py-2 text-right">{p.expected_amount != null ? (Number(p.expected_amount) / 10000).toLocaleString(undefined, {maximumFractionDigits: 2}) : '-'}</td>
+                  <td className="px-3 py-2 text-right">{p.expected_amount != null ? Number(p.expected_amount).toLocaleString(undefined, {maximumFractionDigits: 2}) : '-'}</td>
                   <td className="px-3 py-2 text-center">
                     <span className={`px-2 py-0.5 rounded text-xs ${st?.color}`}>{st?.label || p.approval_status}</span>
                   </td>

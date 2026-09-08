@@ -1,0 +1,30 @@
+app:
+  cors_origins:
+  - http://localhost:5173
+  - http://127.0.0.1:5173
+  - http://localhost:26731
+  - http://127.0.0.1:26731
+  - http://deepquick.com.cn:26731
+  - http://172.16.10.92:26731
+  - http://192.168.5.129:26731
+  debug: false
+  host: 0.0.0.0
+  port: 8000
+database:
+  url: sqlite:////opt/channel-project/backend/data.db
+  echo: false
+  pool_size: 5
+  connect_args:
+    timeout: 30
+jwt:
+  algorithm: HS256
+  expire_minutes: 1440
+  secret_key: server-deploy-20260908-secret-key-do-not-use-in-prod
+upload:
+  local_path: ./uploads
+webdav:
+  base_url: http://172.16.10.252:5006
+  enabled: true
+  password: ""
+  remote_path: /
+  username: admin

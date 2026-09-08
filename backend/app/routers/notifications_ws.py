@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.auth import decode_token, get_current_user, require_admin
 from app.database import get_db, SessionLocal
 from app.models import (
+    AnnouncementDraftHistory,
     AuditAction,
     Notification,
     NotificationChannel,
@@ -173,6 +174,18 @@ def announce(
         actor_id=current_user.id,
     )
     db.commit()
+    # 写一条 source='history' 进历史（与草稿同表）
+    try:
+        db.add(AnnouncementDraftHistory(
+            admin_id=current_user.id,
+            title=payload.title.strip(),
+            content=payload.content.strip(),
+            source='history',
+        ))
+        db.commit()
+    except Exception as e:
+        logging.warning('announce history write failed: %s', e)
+        db.rollback()
     try:
         write_audit(current_user, AuditAction.user_update,
                     target_type='announcement', target_id=None, target_name=payload.title,
@@ -180,6 +193,76 @@ def announce(
     except Exception:
         pass
     return MessageResponse(message="已群发给 {} 位用户".format(sent))
+
+
+@router.get("/announce/draft")
+def get_announcement_draft(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """获取当前 admin 的草稿（最后一次 source='draft' 的内容）"""
+    row = db.query(AnnouncementDraftHistory).filter(
+        AnnouncementDraftHistory.admin_id == current_user.id,
+        AnnouncementDraftHistory.source == 'draft',
+    ).order_by(AnnouncementDraftHistory.id.desc()).first()
+    if not row:
+        return None
+    return {
+        'id': row.id,
+        'title': row.title,
+        'content': row.content,
+        'created_at': row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+@router.post("/announce/draft")
+def save_announcement_draft(
+    payload: SystemAnnouncementRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """保存草稿——仅在 title/content 与上次草稿不同时才写一条 source='draft'"""
+    title = (payload.title or '').strip()
+    content = (payload.content or '').strip()
+    # 都不为空才有意义；与 last 比较
+    last = db.query(AnnouncementDraftHistory).filter(
+        AnnouncementDraftHistory.admin_id == current_user.id,
+        AnnouncementDraftHistory.source == 'draft',
+    ).order_by(AnnouncementDraftHistory.id.desc()).first()
+    if last and last.title == title and last.content == content:
+        return {'saved': False, 'id': last.id, 'message': '内容未变化'}
+    row = AnnouncementDraftHistory(
+        admin_id=current_user.id,
+        title=title,
+        content=content,
+        source='draft',
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {'saved': True, 'id': row.id}
+
+
+@router.get("/announce/history")
+def list_announcement_history(
+    limit: int = Query(50, le=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """获取当前 admin 的历史记录（draft + history 合并，按时间倒序）"""
+    rows = db.query(AnnouncementDraftHistory).filter(
+        AnnouncementDraftHistory.admin_id == current_user.id,
+    ).order_by(AnnouncementDraftHistory.id.desc()).limit(limit).all()
+    return [
+        {
+            'id': r.id,
+            'title': r.title,
+            'content': r.content,
+            'source': r.source,
+            'created_at': r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in rows
+    ]
 
 
 @router.get("/channels", response_model=List[NotificationChannelResponse])
