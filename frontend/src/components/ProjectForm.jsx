@@ -60,6 +60,8 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
   // ★ Fix-2附 / Fix-5a: 标记当前保存是否因为「切换存储区」触发，
   //   只有在这种场景下 handleSubmit 才允许回写 tender_folder / bid_folder。
   const _storageJustChangedRef = useRef(false)
+  // ★ Fix-17: 首次设置中标状态确认弹窗 — 用户点"确认设置"后置 true, 跳过拦截直接保存
+  const _firstWinBidConfirmedRef = useRef(false)
 
   const initial = (key, fallback = '') => {
     if (!project) return fallback
@@ -99,6 +101,8 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
   const [winBidReason, setWinBidReason] = useState('')
   const [winBidPassword, setWinBidPassword] = useState('')
   const [winBidModalError, setWinBidModalError] = useState('')
+  // ★ Fix-17: 首次设置中标状态的轻量确认弹窗 (只需点"确认设置")
+  const [showFirstWinBidModal, setShowFirstWinBidModal] = useState(false)
 
   const [tenderPreview, setTenderPreview] = useState('')
   const [bidPreview, setBidPreview] = useState('')
@@ -422,9 +426,33 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
     return true
   }
 
+  const performSave = async (data) => {
+    try {
+      if (isEdit) await updateProject(project.id, data)
+      else await createProject(data)
+      onSaved?.(); onClose?.()
+    } catch (err) {
+      alert(err.response?.data?.detail || '操作失败')
+    }
+  }
+
   const handleSubmit = async (e) => {
     e.preventDefault()
     if (!validate()) return
+    // ★ Fix-17: 首次设置中标状态 (set_at is None) 时弹轻量确认弹窗
+    if (
+      !_firstWinBidConfirmedRef.current
+      && isEdit
+      && !project?.win_bid_status_set_at
+      && form.win_bid_status
+      && form.win_bid_status !== project?.win_bid_status
+      && !_storageJustChangedRef.current
+    ) {
+      setShowFirstWinBidModal(true)
+      return
+    }
+    // 走到这里说明用户已确认, 把标志重置 (供下次保存再用)
+    _firstWinBidConfirmedRef.current = false
     const data = {
       ...form,
       project_name: form.project_name.trim(),
@@ -466,27 +494,23 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
       delete data.bid_folder
       delete data.storage_zone_id
     }
-    // ★ Fix-8: win_bid_status 防御
-      //   a) 切区保存路径（_storageJustChangedRef=true）—— 绝不带 win_bid_status，
-      //      避免后端中标状态校验触发弹窗；
-      //   b) 非解锁状态 —— form 默认值='in_progress' 等于 DB 当前值，绝不带；
-      //   c) 即使用户真改了 win_bid_status 但值与 DB 相同 —— 也剥离（前端双保险）。
-      if (!winBidUnlocked) {
-        delete data.win_bid_status
+    // ★ Fix-16: win_bid_status 按"首次 vs 二次修改"分情况处理
+      //   首次修改（set_at is None）：无需解锁、无需密码、直接带
+      //   二次修改未解锁（set_at 存在 && !winBidUnlocked）：保护，剥离
+      //   值未变（form === DB）：双保险剥离
+      const isLockedRepeatEdit = !!project?.win_bid_status_set_at && !winBidUnlocked
+      if (_storageJustChangedRef.current) {
+        delete data.win_bid_status            // 切区保存绝不带
+      } else if (isLockedRepeatEdit) {
+        delete data.win_bid_status            // 二次修改未解锁 → 保护
       } else if (form.win_bid_status === project?.win_bid_status) {
-        delete data.win_bid_status
+        delete data.win_bid_status            // 值没变也不带（后端 Fix-7 也会剥）
       }
       if (isAdmin && isEdit && project?.win_bid_status_set_at && winBidUnlocked) {
         data.win_bid_change_reason = winBidReason.trim()
         data.admin_password_verify = winBidPassword
       }
-    try {
-      if (isEdit) await updateProject(project.id, data)
-      else await createProject(data)
-      onSaved?.(); onClose?.()
-    } catch (err) {
-      alert(err.response?.data?.detail || '操作失败')
-    }
+    await performSave(data)
   }
 
   const handleFilesPicked = async (folderType, files) => {
@@ -1636,6 +1660,63 @@ export default function ProjectForm({ project, onClose, onSaved, onDelete, readO
                 className="px-5 py-2 bg-amber-600 text-white rounded-md hover:bg-amber-700 transition shadow-sm"
               >
                 确认解锁
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ★ Fix-17: 首次设置中标状态确认弹窗 (轻量版, 仿二次修改样式, 不填理由/密码) */}
+      {showFirstWinBidModal && (
+        <div className="fixed inset-0 z-[70] bg-black/50 flex items-center justify-center p-4"
+             onClick={(e) => { if (e.target === e.currentTarget) setShowFirstWinBidModal(false) }}>
+          <div className="bg-white rounded-lg shadow-2xl max-w-md w-full p-6">
+            <div className="text-lg font-bold text-gray-800 mb-1 flex items-center gap-2">
+              🎯 确认设置中标状态
+            </div>
+            <p className="text-xs text-gray-500 mb-4">
+              项目「{project?.project_name}」将首次设置中标状态，设置后再次修改需要解锁确认。
+            </p>
+
+            <div className="mb-4 bg-amber-50 border border-amber-200 rounded-md p-3">
+              <div className="text-xs text-gray-600 mb-1">原状态</div>
+              <div className="text-sm font-medium text-gray-800">
+                {project?.win_bid_status === 'yes' ? '中标' :
+                 project?.win_bid_status === 'no' ? '未中标' : '进行中'}
+              </div>
+              <div className="text-xs text-gray-600 mt-2 mb-1">新状态</div>
+              <div className="text-sm font-medium text-amber-700">
+                {form.win_bid_status === 'yes' ? '中标' :
+                 form.win_bid_status === 'no' ? '未中标' : '进行中'}
+              </div>
+            </div>
+
+            {winBidModalError && (
+              <div className="mb-4 text-xs text-red-600 bg-red-50 border border-red-200 rounded p-2">
+                {winBidModalError}
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowFirstWinBidModal(false)}
+                className="px-5 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50 transition"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  setWinBidModalError('')
+                  setShowFirstWinBidModal(false)
+                  // 复用 handleSubmit 的 data 构造逻辑, 通过 ref 跳过首次拦截
+                  _firstWinBidConfirmedRef.current = true
+                  await handleSubmit({ preventDefault: () => {} })
+                }}
+                className="px-5 py-2 bg-amber-600 text-white rounded-md hover:bg-amber-700 transition shadow-sm"
+              >
+                确认设置
               </button>
             </div>
           </div>
