@@ -63,6 +63,7 @@ class UserRole(str, enum.Enum):
     important = "important"           # 重要账号
     normal = "normal"                 # 普通账号
     archive = "archive"               # 档案管理（只读）
+    finance = "finance"               # 财务人员（仅可访问财务催款 + 通知中心）
 
 class CooperationMode(str, enum.Enum):
     long_term = "long_term"
@@ -492,3 +493,78 @@ class NotificationTemplate(Base):
     __table_args__ = (
         UniqueConstraint('type', 'channel', name='uq_nt_type_channel'),
     )
+
+
+# ============== 财务催款模块 ==============
+
+class FinanceReceivable(Base):
+    """应收账款（财务催收页签）
+    字段对齐截图'财务催收'列表：合同号/项目名称/客户/应收款/商务/工程人员/联系电话/计划收款时间/...
+    """
+    __tablename__ = "finance_receivables"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    batch_id = Column(String(40), nullable=False, index=True)  # 导入批次号
+    contract_no = Column(String(100), nullable=True)           # 合同号
+    project_name = Column(String(200), nullable=True)          # 项目名称
+    customer = Column(String(200), nullable=True)               # 客户
+    amount = Column(Float, default=0.0)                        # 应收款（元）
+    sales_person = Column(String(100), nullable=True)          # 商务
+    engineer = Column(String(100), nullable=True)              # 工程人员
+    phone = Column(String(50), nullable=True)                  # 联系电话
+    plan_date = Column(Date, nullable=True)                    # 计划收款时间
+    remind_start_at = Column(Date, nullable=True)              # 提醒启动时间
+    frequency = Column(String(20), default='once', nullable=False)  # once/daily/weekly/monthly
+    reminder_count = Column(Integer, default=0, nullable=False)     # 已提醒次数
+    last_reminder_at = Column(DateTime(timezone=True), nullable=True)  # 上次提醒时间
+    last_status = Column(String(20), default='pending', nullable=False)  # pending/sent/failed
+    remark = Column(String(500), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class FinanceTrust(Base):
+    """财务信托/借支（应收款项页签）
+    字段对齐截图'应收款项'列表：科目名称/期末项目余额/分类/发生时间/公司/部门/员工/联系电话/对账负责人/计划还款时间/...
+    """
+    __tablename__ = "finance_trust"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    batch_id = Column(String(40), nullable=False, index=True)
+    subject_name = Column(String(200), nullable=True)          # 科目名称
+    balance = Column(Float, default=0.0)                       # 期末/项目余额（元）
+    category = Column(String(100), nullable=True)              # 分类（投标保证金/项目费用 等）
+    occurred_at = Column(Date, nullable=True)                  # 发生时间
+    company = Column(String(200), nullable=True)               # 公司
+    department = Column(String(100), nullable=True)            # 部门
+    employee = Column(String(100), nullable=True)              # 员工
+    phone = Column(String(50), nullable=True)                  # 联系电话
+    owner = Column(String(100), nullable=True)                 # 对账负责人
+    plan_repay_date = Column(Date, nullable=True)              # 计划还款时间
+    remind_start_at = Column(Date, nullable=True)              # 提醒启动时间
+    frequency = Column(String(20), default='once', nullable=False)
+    reminder_count = Column(Integer, default=0, nullable=False)
+    last_reminder_at = Column(DateTime(timezone=True), nullable=True)
+    last_status = Column(String(20), default='pending', nullable=False)
+    remark = Column(String(500), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class FinanceReminderLog(Base):
+    """短信提醒发送日志（每次发送写一条）"""
+    __tablename__ = "finance_reminder_logs"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    record_type = Column(String(20), nullable=False, index=True)  # receivables / trust
+    record_id = Column(Integer, nullable=False, index=True)
+    batch_id = Column(String(40), nullable=True, index=True)
+    recipient = Column(String(100), nullable=True)         # 收款人/对账负责人
+    phone = Column(String(50), nullable=True)
+    frequency = Column(String(20), nullable=True)
+    content = Column(Text, nullable=True)
+    status = Column(String(20), default='pending', nullable=False)  # sent/failed/skipped
+    error = Column(String(500), nullable=True)
+    channel_type = Column(String(30), nullable=True)  # sms_custom / sms_aliyun / None
+    provider_response = Column(Text, nullable=True)
+    operator_id = Column(Integer, nullable=True)
+    operator_name = Column(String(100), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
