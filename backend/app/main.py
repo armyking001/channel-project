@@ -14,6 +14,7 @@ from app.database import engine, Base
 from app.routers import auth, users, projects, approvals, reports, file_storage, forms, storage_zones, project_followups, agents, agent_prompts, system as system_router
 from app.routers.audit import router as audit_router
 from app.routers.notifications_ws import router as notifications_router, ws_router as notifications_ws_router
+from app.routers.finance import router as finance_router
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
@@ -615,6 +616,7 @@ app.include_router(agents.router)
 app.include_router(agent_prompts.router)
 app.include_router(notifications_router)
 app.include_router(notifications_ws_router)
+app.include_router(finance_router)  # 财务催款模块
 
 @app.get("/api/health")
 def health_check():

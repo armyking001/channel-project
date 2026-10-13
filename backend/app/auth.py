@@ -104,3 +104,9 @@ def require_not_archive(current_user: User = Depends(get_current_user)) -> User:
     if current_user.role == UserRole.archive:
         raise HTTPException(status_code=403, detail="档案管理账号为只读权限，无法执行此操作")
     return current_user
+
+def require_finance_or_admin(current_user: User = Depends(get_current_user)) -> User:
+    """财务催款模块权限: 仅 finance 或 admin 可访问"""
+    if current_user.role not in [UserRole.admin, UserRole.finance]:
+        raise HTTPException(status_code=403, detail="需要财务人员或管理员权限")
+    return current_user
