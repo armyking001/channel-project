@@ -1,0 +1,11 @@
+database:
+  url: sqlite:////opt/channel-project/backend/data.db
+  echo: false
+  pool_size: 5
+  connect_args:
+    timeout: 30
+
+webdav:
+  default_user: admin
+  default_password: ""
+  timeout: 30

@@ -4,10 +4,12 @@ import {
   getFinanceReceivables, getFinanceTrust, getFinancePersons,
   sendFinanceReminder, updateReceivableFrequency, updateTrustFrequency,
   getFinanceReminderLogs,
+  getFinanceReminderTemplate, saveFinanceReminderTemplate,
   deleteReceivable, deleteReceivablesBulk,
   deleteTrust, deleteTrustsBulk,
   updateReceivableRemindStart, updateReceivableRemindEnd,
   updateTrustRemindStart, updateTrustRemindEnd,
+  bulkUpdateFinanceReminder,
 } from '../api'
 
 // 频率选项
@@ -240,8 +242,106 @@ function DataTable({ type, title, columns }) {
   const [sending, setSending] = useState(false)
   const [selectedPerson, setSelectedPerson] = useState('')  // '' = 全部
   const [freq, setFreq] = useState('once')
+  // 短信模板编辑框(切换 type 时从后端拉一次)
+  const [customTemplate, setCustomTemplate] = useState('')
+  const [templateSaved, setTemplateSaved] = useState('')    // 已保存的模板,用于比较是否改动
+  const [templateFields, setTemplateFields] = useState([])
+  const [templateMaxChars, setTemplateMaxChars] = useState(70)
+  const [templateDirty, setTemplateDirty] = useState(false)  // 用户是否改动过模板
+  const [templateSaving, setTemplateSaving] = useState(false)
   // 选中行(跨页保留)
   const [selectedIds, setSelectedIds] = useState(new Set())
+  // 批量修改提醒
+  const [showBulkUpdate, setShowBulkUpdate] = useState(false)
+  const [bulkUpdating, setBulkUpdating] = useState(false)
+  const [bulkUpdateErr, setBulkUpdateErr] = useState('')
+  const [bulkEnableStart, setBulkEnableStart] = useState(false)  // 是否修改提醒启动时间
+  const [bulkEnableEnd,   setBulkEnableEnd]   = useState(false)  // 是否修改提醒结束时间
+  const [bulkEnableFreq,  setBulkEnableFreq]  = useState(false)  // 是否修改频率
+  const [bulkClearStart,  setBulkClearStart]  = useState(false)  // 启动时间显式置 NULL
+  const [bulkClearEnd,    setBulkClearEnd]    = useState(false)  // 结束时间显式置 NULL
+  const [bulkClearFreq,   setBulkClearFreq]   = useState(false)  // 频率显式置 NULL(恢复默认)
+  const [bulkStart, setBulkStart] = useState('')
+  const [bulkEnd,   setBulkEnd]   = useState('')
+  const [bulkFreq,  setBulkFreq]  = useState('once')
+  // 频率锁定: 选中行频率全部一致时, 锁住下拉避免改错
+  const [bulkFreqLocked, setBulkFreqLocked] = useState(false)
+  const [bulkFreqCommon, setBulkFreqCommon] = useState(null)
+  const [bulkFreqMixed,  setBulkFreqMixed]  = useState(false)
+  // 发送弹窗中的频率锁定(选中行模式且频率一致时)
+  const [sendFreqLocked, setSendFreqLocked] = useState(false)
+  const [sendFreqCommon, setSendFreqCommon] = useState(null)
+  const [sendFreqMixed,  setSendFreqMixed]  = useState(false)
+  const openBulkUpdate = () => {
+    setBulkEnableStart(false); setBulkEnableEnd(false); setBulkEnableFreq(false)
+    setBulkClearStart(false); setBulkClearEnd(false); setBulkClearFreq(false)
+    setBulkStart(''); setBulkEnd(''); setBulkFreq('once')
+    setBulkUpdateErr('')
+    // 计算选中行频率的一致性
+    const sel = items.filter(r => selectedIds.has(r.id))
+    const freqs = sel.map(r => r.frequency).filter(f => f != null && f !== '')
+    if (freqs.length === sel.length && sel.length > 0) {
+      const unique = Array.from(new Set(freqs))
+      if (unique.length === 1) {
+        setBulkFreqLocked(true)
+        setBulkFreqCommon(unique[0])
+        setBulkFreqMixed(false)
+        setBulkFreq(unique[0])
+        setBulkEnableFreq(true)   // 锁定时显示当前值, 用户可取消勾选"修改此项"
+      } else {
+        setBulkFreqLocked(false)
+        setBulkFreqCommon(null)
+        setBulkFreqMixed(true)
+      }
+    } else {
+      setBulkFreqLocked(false)
+      setBulkFreqCommon(null)
+      setBulkFreqMixed(false)
+    }
+    setShowBulkUpdate(true)
+  }
+  const doBulkUpdate = async () => {
+    setBulkUpdateErr('')
+    if (selectedIds.size === 0) return
+    const payload = { record_type: type, record_ids: Array.from(selectedIds) }
+    let picked = 0
+    if (bulkEnableStart) {
+      if (bulkClearStart || bulkStart === '') {
+        payload.remind_start_at = null
+      } else {
+        payload.remind_start_at = bulkStart.length === 16 ? bulkStart + ':00' : bulkStart
+      }
+      picked++
+    }
+    if (bulkEnableEnd) {
+      if (bulkClearEnd || bulkEnd === '') {
+        payload.remind_end_at = null
+      } else {
+        payload.remind_end_at = bulkEnd.length === 16 ? bulkEnd + ':00' : bulkEnd
+      }
+      picked++
+    }
+    if (bulkEnableFreq) {
+      payload.frequency = bulkClearFreq ? null : bulkFreq
+      picked++
+    }
+    if (picked === 0) {
+      setBulkUpdateErr('请至少勾选一个要修改的字段')
+      return
+    }
+    setBulkUpdating(true)
+    try {
+      const r = await bulkUpdateFinanceReminder(payload)
+      const d = r.data || {}
+      alert(`✅ 已更新 ${d.updated ?? selectedIds.size} 条记录\n跳过 ${d.skipped ?? 0} 条${(d.errors?.length ? '\n失败: ' + d.errors.map(e => `#${e.id} ${e.msg}`).join('; ') : '')}`)
+      setShowBulkUpdate(false)
+      load()
+    } catch (e) {
+      setBulkUpdateErr(e.response?.data?.detail || '更新失败')
+    } finally {
+      setBulkUpdating(false)
+    }
+  }
   // 发送范围模式: 'all'=全部人员 / 'person'=选人员 / 'selected'=选中行
   const [sendMode, setSendMode] = useState(() => {
     try { return localStorage.getItem('finance.sendMode') || 'all' } catch (e) { return 'all' }
@@ -350,13 +450,97 @@ function DataTable({ type, title, columns }) {
     }
   }
 
+  // 加载并缓存当前类型对应的短信模板
+  const loadTemplate = async (rt) => {
+    try {
+      const r = await getFinanceReminderTemplate(rt)
+      setCustomTemplate(r.data.template || '')
+      setTemplateFields(r.data.fields || [])
+      setTemplateMaxChars(r.data.max_chars || 70)
+      setTemplateDirty(false)
+      setTemplateSaved(r.data.template || '')
+    } catch (e) {
+      console.error('拉取模板失败', e)
+      setTemplateFields([])
+    }
+  }
+  // 切换 type 时重载模板
+  useEffect(() => { loadTemplate(type) }, [type])
+
+  const saveTemplate = async () => {
+    setTemplateSaving(true)
+    try {
+      const t = customTemplate.trim()
+      await saveFinanceReminderTemplate(type, t)
+      setTemplateSaved(t)
+      setTemplateDirty(false)
+    } catch (e) {
+      alert(e.response?.data?.detail || '保存模板失败')
+    } finally {
+      setTemplateSaving(false)
+    }
+  }
+  // 当模板编辑框内容变化时,判断是否相对已保存版本有改动
+  const onTemplateChange = (v) => {
+    setCustomTemplate(v)
+    setTemplateDirty(v.trim() !== templateSaved.trim())
+  }
+
   const openSend = async () => {
     setShowSend(true)
     setSendResult(null)
     setSelectedPerson('')
-    setFreq('once')
     setSendMode(selectedIds.size > 0 ? 'selected' : 'all')
+    // 选中行模式 + 频率一致 -> 锁定频率
+    const initialMode = selectedIds.size > 0 ? 'selected' : 'all'
+    if (initialMode === 'selected') {
+      const sel = items.filter(r => selectedIds.has(r.id))
+      const freqs = sel.map(r => r.frequency).filter(f => f != null && f !== '')
+      if (freqs.length === sel.length && sel.length > 0) {
+        const unique = Array.from(new Set(freqs))
+        if (unique.length === 1) {
+          setSendFreqLocked(true)
+          setSendFreqCommon(unique[0])
+          setSendFreqMixed(false)
+          setFreq(unique[0])
+        } else {
+          setSendFreqLocked(false)
+          setSendFreqCommon(null)
+          setSendFreqMixed(true)
+          setFreq('once')
+        }
+      } else {
+        setSendFreqLocked(false)
+        setSendFreqCommon(null)
+        setSendFreqMixed(false)
+        setFreq('once')
+      }
+    } else {
+      setSendFreqLocked(false)
+      setSendFreqCommon(null)
+      setSendFreqMixed(false)
+      setFreq('once')
+    }
     if (persons.length === 0) await loadPersons()
+  }
+  // 切换发送模式时, 同步重算频率锁定
+  const onSendModeChange = (m) => {
+    setSendMode(m)
+    if (m === 'selected' && selectedIds.size > 0) {
+      const sel = items.filter(r => selectedIds.has(r.id))
+      const freqs = sel.map(r => r.frequency).filter(f => f != null && f !== '')
+      if (freqs.length === sel.length && sel.length > 0) {
+        const unique = Array.from(new Set(freqs))
+        if (unique.length === 1) {
+          setSendFreqLocked(true); setSendFreqCommon(unique[0]); setSendFreqMixed(false); setFreq(unique[0])
+          return
+        }
+        setSendFreqLocked(false); setSendFreqCommon(null); setSendFreqMixed(true); setFreq('once'); return
+      }
+      setSendFreqLocked(false); setSendFreqCommon(null); setSendFreqMixed(false); setFreq('once')
+    } else {
+      setSendFreqLocked(false); setSendFreqCommon(null); setSendFreqMixed(false); setFreq('once')
+    }
   }
   const doSend = async () => {
     setSending(true)
@@ -370,6 +554,8 @@ function DataTable({ type, title, columns }) {
         frequency: freq,
         channels: channels.length ? channels : undefined,
       }
+      // 始终把当前模板透传给后端(空字符串也透传,后端视作"用默认")
+      payload.custom_template = customTemplate.trim()
       if (sendMode === 'selected') {
         payload.record_ids = Array.from(selectedIds)
       } else if (sendMode === 'person' && selectedPerson) {
@@ -477,6 +663,12 @@ function DataTable({ type, title, columns }) {
           )}
         </span>
         {selectedIds.size > 0 && (
+          <button onClick={openBulkUpdate}
+            className="px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-300 text-xs rounded shadow-sm">
+            ⚙ 批量修改提醒 ({selectedIds.size})
+          </button>
+        )}
+        {selectedIds.size > 0 && (
           <button onClick={confirmBulkDelete}
             className="px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 text-xs rounded shadow-sm">
             🗑 批量删除 ({selectedIds.size})
@@ -486,6 +678,53 @@ function DataTable({ type, title, columns }) {
           className="px-4 py-1.5 bg-amber-500 hover:bg-amber-600 text-white text-sm rounded shadow-sm">
           📱 发送催收
         </button>
+      </div>
+
+      {/* 第三行: 短信内容模板编辑框(按 type 自动重载) */}
+      <div className="mt-2 border border-amber-200 bg-amber-50/50 rounded p-2 max-w-[100ch]">
+        <div className="flex items-center justify-between mb-1">
+          <label className="block text-xs font-medium text-gray-700">
+            短信内容模板({type === 'receivables' ? '应收款项' : '财务借支'})
+            {templateDirty
+              ? <span className="ml-2 text-amber-700">● 未保存</span>
+              : <span className="ml-2 text-gray-400">已同步</span>}
+          </label>
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-gray-500">{customTemplate.length}/{templateMaxChars}</span>
+            <button type="button"
+              onClick={() => onTemplateChange('')}
+              className="px-2 py-0.5 border border-gray-300 rounded text-gray-600 hover:bg-gray-50 bg-white"
+              title="清空后本次发送会用后端默认模板">
+              清空
+            </button>
+            <button type="button"
+              onClick={saveTemplate}
+              disabled={templateSaving || !templateDirty}
+              className={`px-3 py-0.5 rounded text-white text-xs ${templateDirty ? 'bg-amber-500 hover:bg-amber-600' : 'bg-gray-300 cursor-not-allowed'}`}>
+              {templateSaving ? '保存中…' : '保存模板'}
+            </button>
+          </div>
+        </div>
+        <textarea
+          value={customTemplate}
+          onChange={e => onTemplateChange(e.target.value)}
+          rows={2}
+          placeholder='留空则用后端默认模板,可用 {字段名} 或 {字段名:日期格式} 占位'
+          className={`w-full border rounded px-3 py-2 text-xs font-mono bg-white ${customTemplate.length > templateMaxChars ? 'border-red-400' : 'border-gray-300'}`}
+        />
+        {templateFields.length > 0 && (
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {templateFields.map(f => (
+              <button key={f.key} type="button"
+                onClick={() => onTemplateChange(customTemplate + `{${f.key}${f.fmt ? ':' + f.fmt : ''}}`)}
+                title={f.label + (f.fmt ? ` (默认格式 ${f.fmt})` : '')}
+                className="px-1.5 py-0.5 text-[11px] bg-white hover:bg-amber-100 border border-gray-300 rounded">
+                {`{${f.key}${f.fmt ? ':' + f.fmt : ''}}`}
+              </button>
+            ))}
+          </div>
+        )}
+        <p className="text-[11px] text-gray-500 mt-1">点保存后,本次及后续所有发送都按此模板渲染(留空 = 用后端默认模板)。</p>
       </div>
 
       <div className="overflow-x-auto">
@@ -564,7 +803,7 @@ function DataTable({ type, title, columns }) {
                   { v: 'person',   l: '👤 选人员' },
                   { v: 'selected', l: `☑ 选中行 (${selectedIds.size})` },
                 ].map(m => (
-                  <button key={m.v} type="button" onClick={() => setSendMode(m.v)}
+                  <button key={m.v} type="button" onClick={() => onSendModeChange(m.v)}
                     disabled={m.v === 'selected' && selectedIds.size === 0}
                     className={`flex-1 px-2 py-1.5 rounded border text-xs ${sendMode === m.v ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50 disabled:opacity-40'}`}>
                     {m.l}
@@ -594,12 +833,29 @@ function DataTable({ type, title, columns }) {
               )}
             </div>
             <div className="mb-3">
-              <label className="block text-sm font-medium text-gray-700 mb-1">频率</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                频率
+                {sendFreqLocked && (
+                  <span className="ml-2 px-1.5 py-0.5 text-[10px] bg-gray-100 text-gray-600 border border-gray-300 rounded">
+                    🔒 已锁定(选中 {selectedIds.size} 行频率均为 {FREQ_LABEL[sendFreqCommon] || sendFreqCommon})
+                  </span>
+                )}
+                {sendFreqMixed && (
+                  <span className="ml-2 px-1.5 py-0.5 text-[10px] bg-amber-100 text-amber-700 border border-amber-300 rounded">
+                    ⚠ 选中行频率不一致
+                  </span>
+                )}
+              </label>
               <select value={freq} onChange={e => setFreq(e.target.value)}
-                className="w-full border rounded px-3 py-2 text-sm">
+                disabled={sendFreqLocked}
+                className={`w-full border rounded px-3 py-2 text-sm ${sendFreqLocked ? 'bg-gray-100 text-gray-500 cursor-not-allowed' : ''}`}>
                 {FREQ_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
               </select>
-              <p className="text-xs text-gray-400 mt-1">选 daily/weekly/monthly 时, 将按此频率持续发送, 需中途干预或停用</p>
+              <p className="text-xs text-gray-400 mt-1">
+                {sendFreqLocked
+                  ? '频率与选中记录一致, 不可修改 (避免前后不一致)'
+                  : '选 daily/weekly/monthly 时, 将按此频率持续发送, 需中途干预或停用'}
+              </p>
             </div>
             {sendResult && (
               <div className={`mb-3 p-3 rounded text-sm ${sendResult.success ? 'bg-blue-50 text-blue-800' : 'bg-red-50 text-red-800'}`}>
@@ -607,8 +863,15 @@ function DataTable({ type, title, columns }) {
                   <>
                     <div>✅ 完成,共 {sendResult.target_count} 条记录</div>
                     <div className="text-xs mt-1">
-                      成功 {sendResult.sent} · 失败 {sendResult.failed} · 跳过 {sendResult.skipped} · 无通道 {sendResult.no_channel}
+                      {sendResult.scheduled > 0
+                        ? `已排程 ${sendResult.scheduled} (按 ${sendResult.frequency} 频率,将在提醒启动时间自动发送)`
+                        : `成功 ${sendResult.sent} · 失败 ${sendResult.failed} · 跳过 ${sendResult.skipped} · 无通道 ${sendResult.no_channel}`}
                     </div>
+                    {sendResult.scheduled > 0 && (sendResult.failed > 0 || sendResult.skipped > 0 || sendResult.no_channel > 0) && (
+                      <div className="text-xs mt-1 text-gray-600">
+                        其他:失败 {sendResult.failed} · 跳过 {sendResult.skipped} · 无通道 {sendResult.no_channel}
+                      </div>
+                    )}
                     {sendResult.warning && <div className="text-xs text-amber-700 mt-1">⚠ {sendResult.warning}</div>}
                   </>
                 ) : (
@@ -621,6 +884,121 @@ function DataTable({ type, title, columns }) {
               <button onClick={doSend} disabled={sending}
                 className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white text-sm rounded disabled:opacity-50">
                 {sending ? '发送中…' : '确认发送'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 批量修改提醒弹窗 */}
+      {showBulkUpdate && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4"
+             onClick={e => { if (e.target === e.currentTarget) setShowBulkUpdate(false) }}>
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-5 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-semibold text-gray-800">
+                批量修改提醒 · {type === 'receivables' ? '应收款项' : '财务借支'}
+              </h3>
+              <button onClick={() => setShowBulkUpdate(false)}
+                className="text-gray-400 hover:text-gray-600 text-xl leading-none">×</button>
+            </div>
+            <p className="text-xs text-gray-500">
+              将对 <b className="text-blue-600">{selectedIds.size}</b> 条已选记录生效。
+              勾选"修改此项"才会更新该字段,未勾选字段保持原值不变。
+            </p>
+
+            {/* 提醒启动时间 */}
+            <div className="border border-gray-200 rounded p-3 space-y-2">
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" checked={bulkEnableStart}
+                  onChange={e => setBulkEnableStart(e.target.checked)} />
+                <span className="font-medium">提醒启动时间</span>
+              </label>
+              {bulkEnableStart && (
+                <div className="ml-6 space-y-1.5">
+                  <label className="flex items-center gap-2 text-xs text-gray-600">
+                    <input type="checkbox" checked={bulkClearStart}
+                      onChange={e => setBulkClearStart(e.target.checked)}
+                      disabled={!bulkEnableStart} />
+                    <span>清空(置 NULL)</span>
+                  </label>
+                  {!bulkClearStart && (
+                    <input type="datetime-local" value={bulkStart}
+                      onChange={e => setBulkStart(e.target.value)}
+                      className="px-2 py-1 border rounded text-sm w-full" />
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* 提醒结束时间 */}
+            <div className="border border-gray-200 rounded p-3 space-y-2">
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" checked={bulkEnableEnd}
+                  onChange={e => setBulkEnableEnd(e.target.checked)} />
+                <span className="font-medium">提醒结束时间</span>
+              </label>
+              {bulkEnableEnd && (
+                <div className="ml-6 space-y-1.5">
+                  <label className="flex items-center gap-2 text-xs text-gray-600">
+                    <input type="checkbox" checked={bulkClearEnd}
+                      onChange={e => setBulkClearEnd(e.target.checked)}
+                      disabled={!bulkEnableEnd} />
+                    <span>清空(置 NULL)</span>
+                  </label>
+                  {!bulkClearEnd && (
+                    <input type="datetime-local" value={bulkEnd}
+                      onChange={e => setBulkEnd(e.target.value)}
+                      className="px-2 py-1 border rounded text-sm w-full" />
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* 提醒频率 */}
+            <div className="border border-gray-200 rounded p-3 space-y-2">
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" checked={bulkEnableFreq}
+                  onChange={e => setBulkEnableFreq(e.target.checked)} />
+                <span className="font-medium">提醒频率</span>
+                {bulkFreqMixed && (
+                  <span className="ml-1 px-1.5 py-0.5 text-[10px] bg-amber-100 text-amber-700 border border-amber-300 rounded">
+                    ⚠ 选中行频率不一致: {Array.from(new Set(items.filter(r => selectedIds.has(r.id)).map(r => r.frequency || '(空)'))).join(' / ')}
+                  </span>
+                )}
+              </label>
+              {bulkEnableFreq && (
+                <div className="ml-6 space-y-1.5">
+                  <label className="flex items-center gap-2 text-xs text-gray-600">
+                    <input type="checkbox" checked={bulkClearFreq}
+                      onChange={e => setBulkClearFreq(e.target.checked)}
+                      disabled={!bulkEnableFreq} />
+                    <span>清空(置 NULL = 使用默认)</span>
+                  </label>
+                  {!bulkClearFreq && (
+                    <select value={bulkFreq} onChange={e => setBulkFreq(e.target.value)}
+                      className="px-2 py-1 border rounded text-sm w-full">
+                      {FREQ_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {bulkUpdateErr && (
+              <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">
+                {bulkUpdateErr}
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-2 border-t">
+              <button onClick={() => setShowBulkUpdate(false)}
+                className="px-4 py-2 border rounded text-gray-700 text-sm hover:bg-gray-50">
+                取消
+              </button>
+              <button onClick={doBulkUpdate} disabled={bulkUpdating}
+                className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white text-sm rounded disabled:opacity-50">
+                {bulkUpdating ? '更新中…' : '确认更新'}
               </button>
             </div>
           </div>

@@ -1,0 +1,21 @@
+app:
+  cors_origins:
+  - http://localhost:5173
+  - http://127.0.0.1:5173
+  debug: true
+  host: 0.0.0.0
+  port: 8765
+database:
+  url: sqlite:///Y:/soft-RED/hermes/开发软件/渠道项目登记/backend/data.db
+jwt:
+  algorithm: HS256
+  expire_minutes: 1440
+  secret_key: your-super-secret-key-change-in-production
+upload:
+  local_path: ./uploads
+webdav:
+  base_url: ''
+  enabled: false
+  password: ''
+  remote_path: ''
+  username: ''

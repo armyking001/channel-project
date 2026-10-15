@@ -520,6 +520,7 @@ class FinanceReceivable(Base):
     frequency = Column(String(20), default='once', nullable=False)  # once/daily/weekly/monthly
     reminder_count = Column(Integer, default=0, nullable=False)     # 已提醒次数
     last_reminder_at = Column(DateTime(timezone=True), nullable=True)  # 上次提醒时间
+    last_fired_at = Column(DateTime(timezone=True), nullable=True)     # 调度器门控: 本边界是否已触发(防同 tick/失败重试)
     last_status = Column(String(20), default='pending', nullable=False)  # pending/sent/failed
     remark = Column(String(500), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -548,6 +549,7 @@ class FinanceTrust(Base):
     frequency = Column(String(20), default='once', nullable=False)
     reminder_count = Column(Integer, default=0, nullable=False)
     last_reminder_at = Column(DateTime(timezone=True), nullable=True)
+    last_fired_at = Column(DateTime(timezone=True), nullable=True)
     last_status = Column(String(20), default='pending', nullable=False)
     remark = Column(String(500), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

@@ -1,0 +1,13 @@
+﻿instance_id,field,old_value,new_value
+39,storage_zone_id,9,
+39,tender_folder,https://172.16.10.252:5006/opencalw-1/自营测试区/长老+自营测试1+2026-09-03/招标资料,
+39,bid_folder,https://172.16.10.252:5006/opencalw-1/自营测试区/长老+自营测试1+2026-09-03/投标文档,
+40,storage_zone_id,5,
+40,tender_folder,https://172.16.1.22:5006/soft-RED/渠道/张三+渠道-1.22+2026-09-03/招标资料,
+40,bid_folder,https://172.16.1.22:5006/soft-RED/渠道/张三+渠道-1.22+2026-09-03/投标文档,
+41,storage_zone_id,6,
+41,tender_folder,https://172.16.1.22:5006/soft-RED/自营/张林+自营-1.22-测试2+2026-09-03/招标资料,
+41,bid_folder,https://172.16.1.22:5006/soft-RED/自营/张林+自营-1.22-测试2+2026-09-03/投标文档,
+42,storage_zone_id,9,
+42,tender_folder,https://172.16.10.252:5006/opencalw-1/自营测试区/张林+自营换渠道存储+2026-09-04/招标资料,
+42,bid_folder,https://172.16.10.252:5006/opencalw-1/自营测试区/张林+自营换渠道存储+2026-09-04/投标文档,

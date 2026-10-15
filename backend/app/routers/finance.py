@@ -11,6 +11,7 @@ PUT    /api/finance/trust/{id}/frequency        更新信托记录频率
 GET    /api/finance/reminder/logs               发送日志查询(辅助)
 """
 import io
+import json
 import logging
 from datetime import datetime
 from typing import List, Optional
@@ -28,6 +29,7 @@ from app.models import (
 from app.services.finance_excel import (
     import_receivables, import_trust, send_sms_for_record,
 )
+from app.models import NotificationChannel
 
 log = logging.getLogger("finance_router")
 router = APIRouter(prefix="/api/finance", tags=["finance"])
@@ -234,7 +236,11 @@ def api_send_reminder(
       record_ids?: [1,2,3] (精确到记录,优先级高于 person_name)
       frequency: 'once'|'daily'|'weekly'|'monthly' (本次发送的频率快照)
     }
-    返回: {success, sent, failed, skipped, no_channel, warning?, items: [...]}
+    行为:
+      - frequency == 'once': 立即调用 send_sms_for_record 走真实通道发送
+      - frequency in (daily/weekly/monthly): 只把频率持久化到记录上,
+        由 reminder_scheduler 在 remind_start_at 到点时统一调度, 点击瞬间不发
+    返回: {success, sent, failed, skipped, no_channel, scheduled, warning?, items: [...]}
     """
     record_type = (payload.get("record_type") or "").strip()
     if record_type not in ("receivables", "trust"):
@@ -242,7 +248,10 @@ def api_send_reminder(
     person_name = (payload.get("person_name") or "").strip()
     record_ids = payload.get("record_ids") or []
     frequency = (payload.get("frequency") or "once").strip()
+    if frequency not in ("once", "daily", "weekly", "monthly"):
+        frequency = "once"
     channels = payload.get("channels") or None  # 本次允许的通道顺序
+    custom_template = (payload.get("custom_template") or "").strip() or None  # 用户在弹窗编辑的模板
 
     Model = FinanceReceivable if record_type == "receivables" else FinanceTrust
     q = db.query(Model)
@@ -265,48 +274,205 @@ def api_send_reminder(
 
     records = q.all()
     if not records:
-        return {"success": True, "sent": 0, "failed": 0, "skipped": 0, "no_channel": 0, "items": []}
+        return {
+            "success": True, "record_type": record_type, "target_count": 0,
+            "sent": 0, "failed": 0, "skipped": 0, "no_channel": 0, "scheduled": 0,
+            "items": [],
+        }
 
-    sent = failed = skipped = no_channel = 0
+    sent = failed = skipped = no_channel = scheduled = 0
     warning_msg = None
     items = []
-    for rec in records:
-        try:
-            res = send_sms_for_record(db, record_type, rec, frequency, current_user, channels=channels)
-            if res["status"] == "sent":
-                sent += 1
-            elif res["status"] == "skipped":
-                skipped += 1
-            else:
-                # failed 包含原 no_channel(没有可用通道也是失败)
-                if res.get("channel") is None and "通道" in (res.get("error") or ""):
-                    no_channel += 1
-                    if not warning_msg:
-                        warning_msg = "未配置已启用的通道,无法发送,请先在'通知管理'中配置"
+
+    if frequency == "once":
+        # 仅一次: 立即走真实通道发送
+        for rec in records:
+            try:
+                res = send_sms_for_record(
+                    db, record_type, rec, frequency, current_user,
+                    channels=channels, custom_template=custom_template,
+                )
+                if res["status"] == "sent":
+                    sent += 1
+                elif res["status"] == "skipped":
+                    skipped += 1
                 else:
-                    failed += 1
-            items.append({
-                "record_id": rec.id,
-                "phone": getattr(rec, "phone", None),
-                "status": res["status"],
-                "error": res.get("error"),
-                "channel": res.get("channel"),
-            })
+                    # failed 包含原 no_channel(没有可用通道也是失败)
+                    if res.get("channel") is None and "通道" in (res.get("error") or ""):
+                        no_channel += 1
+                        if not warning_msg:
+                            warning_msg = "未配置已启用的通道,无法发送,请先在'通知管理'中配置"
+                    else:
+                        failed += 1
+                items.append({
+                    "record_id": rec.id,
+                    "phone": getattr(rec, "phone", None),
+                    "status": res["status"],
+                    "error": res.get("error"),
+                    "channel": res.get("channel"),
+                    "next_run_at": None,
+                })
+            except Exception as e:
+                log.exception("send reminder failed for record_id=%s", rec.id)
+                failed += 1
+                items.append({"record_id": rec.id, "status": "failed", "error": str(e)[:200], "channel": None, "next_run_at": None})
+    else:
+        # 周期频率: 只把频率写到记录上, 实际发送由 reminder_scheduler 在 remind_start_at 到点时调度
+        for rec in records:
+            try:
+                start_at = getattr(rec, "remind_start_at", None)
+                if start_at is None:
+                    skipped += 1
+                    items.append({
+                        "record_id": rec.id,
+                        "phone": getattr(rec, "phone", None),
+                        "status": "skipped",
+                        "error": "未设置提醒启动时间,无法按周期频率排程",
+                        "channel": None,
+                        "next_run_at": None,
+                    })
+                    continue
+                # 把频率持久化到记录上 (若不同), 让 scheduler 按此频率调度
+                if (rec.frequency or "once") != frequency:
+                    rec.frequency = frequency
+                scheduled += 1
+                items.append({
+                    "record_id": rec.id,
+                    "phone": getattr(rec, "phone", None),
+                    "status": "scheduled",
+                    "error": None,
+                    "channel": None,
+                    "next_run_at": start_at.isoformat(),
+                })
+            except Exception as e:
+                log.exception("schedule reminder failed for record_id=%s", rec.id)
+                failed += 1
+                items.append({"record_id": rec.id, "status": "failed", "error": str(e)[:200], "channel": None, "next_run_at": None})
+        try:
+            db.commit()
         except Exception as e:
-            log.exception("send reminder failed for record_id=%s", rec.id)
-            failed += 1
-            items.append({"record_id": rec.id, "status": "failed", "error": str(e)[:200], "channel": None})
+            log.exception("commit scheduled reminder failed")
+            db.rollback()
 
     out = {
         "success": True,
         "record_type": record_type,
         "target_count": len(records),
+        "frequency": frequency,
         "sent": sent, "failed": failed, "skipped": skipped, "no_channel": no_channel,
+        "scheduled": scheduled,
         "items": items,
     }
     if warning_msg:
         out["warning"] = warning_msg
     return out
+
+
+# ============ 短信模板(前端编辑框读写) ============
+
+_TEMPLATE_KEYS = {
+    "receivables": "finance_summary_receivables",
+    "trust": "finance_summary_trust",
+}
+_TEMPLATE_DEFAULTS = {
+    "receivables": "【应收】项目{project_name} 客户{customer} 金额¥{amount:,.2f} 计划{plan_date:%Y%m%d}",
+    "trust": "【借支】{employee} 科目{subject_name} 余额¥{balance:,.2f} 计划{plan_repay_date:%Y%m%d}",
+}
+
+
+def _get_sms_custom_cfg(db: Session) -> dict:
+    ch = db.query(NotificationChannel).filter(NotificationChannel.type == "sms_custom").first()
+    if not ch or not ch.config:
+        return {}
+    try:
+        return json.loads(ch.config)
+    except Exception:
+        return {}
+
+
+@router.get("/reminder/template")
+def api_get_reminder_template(
+    record_type: str = Query(..., regex="^(receivables|trust)$"),
+    current_user: User = Depends(require_finance_or_admin),
+    db: Session = Depends(get_db),
+):
+    """读取 sms_custom.cfg 中保存的模板(若未保存则返回硬编码默认)。
+    返回: {record_type, template, default_template, fields:[...], max_chars}
+    """
+    cfg = _get_sms_custom_cfg(db)
+    key = _TEMPLATE_KEYS[record_type]
+    template = cfg.get(key) or _TEMPLATE_DEFAULTS[record_type]
+    # 字段提示:供前端在编辑框下方展示可用的占位符
+    if record_type == "receivables":
+        fields = [
+            {"key": "contract_no",   "label": "合同号"},
+            {"key": "project_name",  "label": "项目名称"},
+            {"key": "customer",      "label": "客户"},
+            {"key": "amount",        "label": "应收款"},
+            {"key": "sales_person",  "label": "商务"},
+            {"key": "engineer",      "label": "工程人员"},
+            {"key": "phone",         "label": "联系电话"},
+            {"key": "plan_date",     "label": "计划收款时间", "fmt": "%Y%m%d"},
+        ]
+    else:
+        fields = [
+            {"key": "subject_name",     "label": "科目名称"},
+            {"key": "balance",          "label": "期末项目余额"},
+            {"key": "category",         "label": "分类"},
+            {"key": "occurred_at",      "label": "发生时间", "fmt": "%Y%m%d"},
+            {"key": "company",          "label": "公司"},
+            {"key": "department",       "label": "部门"},
+            {"key": "employee",         "label": "员工"},
+            {"key": "phone",            "label": "联系电话"},
+            {"key": "owner",            "label": "对账负责人"},
+            {"key": "plan_repay_date",  "label": "计划还款时间", "fmt": "%Y%m%d"},
+        ]
+    return {
+        "record_type": record_type,
+        "template": template,
+        "default_template": _TEMPLATE_DEFAULTS[record_type],
+        "fields": fields,
+        "max_chars": int(cfg.get("finance_max_chars") or 70),
+    }
+
+
+@router.put("/reminder/template")
+def api_put_reminder_template(
+    payload: dict,
+    current_user: User = Depends(require_finance_or_admin),
+    db: Session = Depends(get_db),
+):
+    """保存模板到 sms_custom.cfg.config(同时确保 sms_custom 通道存在)。
+    payload: {record_type: 'receivables'|'trust', template: '...'}
+    """
+    record_type = (payload.get("record_type") or "").strip()
+    template = (payload.get("template") or "").strip()
+    if record_type not in _TEMPLATE_KEYS:
+        raise HTTPException(status_code=400, detail="record_type 必须为 receivables 或 trust")
+    if not template:
+        raise HTTPException(status_code=400, detail="template 不能为空")
+
+    ch = db.query(NotificationChannel).filter(NotificationChannel.type == "sms_custom").first()
+    if not ch:
+        ch = NotificationChannel(
+            type="sms_custom",
+            name="短信通道-自定义HTTP",
+            enabled=True,
+            config="{}",
+        )
+        db.add(ch)
+        db.flush()
+    cur = {}
+    if ch.config:
+        try:
+            cur = json.loads(ch.config)
+        except Exception:
+            cur = {}
+    cur[_TEMPLATE_KEYS[record_type]] = template
+    ch.config = json.dumps(cur, ensure_ascii=False)
+    db.add(ch)
+    db.commit()
+    return {"success": True, "record_type": record_type, "template": template}
 
 
 # ============ 频率更新 ============
@@ -451,6 +617,121 @@ def _parse_iso_datetime(s: str):
         except Exception:
             continue
     return None
+
+
+# ============ 批量修改提醒字段(启动时间/结束时间/频率) ============
+
+@router.put("/reminder/bulk-update")
+def api_bulk_update_reminder(
+    payload: dict,
+    current_user: User = Depends(require_finance_or_admin),
+):
+    """批量修改提醒字段
+    Body: {
+      record_type: "receivables" | "trust",
+      record_ids: [int, ...],
+      remind_start_at?: "2026-10-15T14:30" | null,   # 缺省=不改; null=清空
+      remind_end_at?:   同上,
+      frequency?:       "once"|"daily"|"weekly"|"monthly" | null
+    }
+    返回: { updated, skipped, fields_set, errors: [{id, msg}] }
+    """
+    rt = (payload.get("record_type") or "").strip().lower()
+    if rt not in ("receivables", "trust"):
+        raise HTTPException(status_code=400, detail="record_type 必须为 receivables/trust")
+    ids = payload.get("record_ids") or []
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(status_code=400, detail="record_ids 不能为空")
+    ids = [int(x) for x in ids if str(x).strip() and str(x).lstrip("-").isdigit()]
+    if not ids:
+        raise HTTPException(status_code=400, detail="record_ids 不能为空")
+
+    # 收集要更新的字段(以 payload 中显式出现的键为准,值非空=覆盖,null=清空,缺省=跳过)
+    fields_to_set = []  # [(col_name, value_or_None)]
+    if "remind_start_at" in payload:
+        v = payload["remind_start_at"]
+        if v in (None, "", "null"):
+            fields_to_set.append(("remind_start_at", None))
+        else:
+            parsed = _parse_iso_datetime(v)
+            if parsed is None:
+                raise HTTPException(status_code=400, detail=f"无法解析 remind_start_at: {v!r}")
+            fields_to_set.append(("remind_start_at", parsed))
+    if "remind_end_at" in payload:
+        v = payload["remind_end_at"]
+        if v in (None, "", "null"):
+            fields_to_set.append(("remind_end_at", None))
+        else:
+            parsed = _parse_iso_datetime(v)
+            if parsed is None:
+                raise HTTPException(status_code=400, detail=f"无法解析 remind_end_at: {v!r}")
+            fields_to_set.append(("remind_end_at", parsed))
+    if "frequency" in payload:
+        v = payload["frequency"]
+        if v in (None, "", "null"):
+            fields_to_set.append(("frequency", None))
+        else:
+            v = str(v).strip().lower()
+            if v not in ("once", "daily", "weekly", "monthly"):
+                raise HTTPException(status_code=400, detail="frequency 必须为 once/daily/weekly/monthly")
+            fields_to_set.append(("frequency", v))
+
+    if not fields_to_set:
+        raise HTTPException(status_code=400, detail="至少要指定一个要更新的字段")
+
+    # 字段白名单 + 表名
+    table = "finance_receivables" if rt == "receivables" else "finance_trust"
+    allowed = {"remind_start_at", "remind_end_at", "frequency"}
+    set_clauses = []
+    params = []
+    for col, val in fields_to_set:
+        if col not in allowed:
+            continue
+        set_clauses.append(f"{col} = ?")
+        params.append(val)  # None -> SQL NULL
+    set_sql = ", ".join(set_clauses)
+
+    # 用纯 sqlite3 直连(避开 SA 锁竞争), autocommit + busy_timeout
+    from app.database import load_config
+    cfg = load_config()
+    db_path = cfg["database"]["url"].replace("sqlite:///", "", 1)
+    if db_path.startswith("/") and len(db_path) > 2 and db_path[2] == ":":
+        db_path = db_path[1:]
+    import sqlite3 as _sqlite3
+    c = _sqlite3.connect(db_path, timeout=15, isolation_level=None)
+    try:
+        c.execute("PRAGMA busy_timeout = 15000")
+        c.execute("PRAGMA journal_mode = MEMORY")
+        # 校验 ID 存在性,过滤掉无效 ID
+        placeholders = ",".join(["?"] * len(ids))
+        existing_rows = c.execute(
+            f"SELECT id FROM {table} WHERE id IN ({placeholders})", ids
+        ).fetchall()
+        existing_ids = {r[0] for r in existing_rows}
+        missing = [i for i in ids if i not in existing_ids]
+
+        updated = 0
+        errors = [{"id": mid, "msg": "记录不存在"} for mid in missing]
+        for rid in existing_ids:
+            try:
+                c.execute(
+                    f"UPDATE {table} SET {set_sql} WHERE id = ?",
+                    params + [rid],
+                )
+                updated += 1
+            except Exception as e:
+                errors.append({"id": rid, "msg": str(e)})
+        return {
+            "success": True,
+            "record_type": rt,
+            "requested": len(ids),
+            "updated": updated,
+            "skipped": len(missing),
+            "fields_set": [col for col, _ in fields_to_set],
+            "errors": errors,
+        }
+    finally:
+        c.close()
 
 
 # ============ 删除(单条 / 批量) ============

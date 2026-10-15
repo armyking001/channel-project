@@ -32,10 +32,17 @@ _PLACEHOLDER_RE = re.compile(r"\{([a-zA-Z_]+)(?::([^}]+))?\}")
 
 
 def _format_value(v: Any, fmt: Optional[str], default: str) -> str:
-    """单字段渲染：处理空值、datetime、format-spec（如 :,.2f / :%m-%d）"""
+    """单字段渲染：处理空值、datetime、format-spec（如 :,.2f / :%m-%d）
+    日期/时间无格式说明时默认 %Y%m%d 紧凑输出 (节省短信字符)"""
     if v is None or v == "":
         return default
+    # 兜底: 日期/时间无格式说明 -> 紧凑 8 位数字
     if fmt is None:
+        if hasattr(v, "strftime"):
+            try:
+                return v.strftime("%Y%m%d")
+            except Exception:
+                pass
         s = str(v).strip()
         return s or default
     try:
@@ -47,6 +54,11 @@ def _format_value(v: Any, fmt: Optional[str], default: str) -> str:
             return prefix + format(v, cleaned)
         return format(v, fmt)
     except Exception:
+        if hasattr(v, "strftime"):
+            try:
+                return v.strftime("%Y%m%d")
+            except Exception:
+                pass
         s = str(v).strip()
         return s or default
 
@@ -472,8 +484,16 @@ def _send_dingtalk_corp(channel, user, title: str, content: str) -> Dict[str, An
 
 # ============ 短信发送 ============
 
-def _build_content(db: Session, record_type: str, record) -> Tuple[str, str]:
+def _build_content(
+    db: Session,
+    record_type: str,
+    record,
+    override_template: Optional[str] = None,
+) -> Tuple[str, str]:
     """根据 sms_custom.cfg 中的 finance_summary_* 模板渲染短信摘要,自动裁剪到 finance_max_chars
+
+    override_template: 若不为空,则本次发送直接用该模板(覆盖 cfg 中的默认值),
+                       同时把该模板写回 cfg 持久化(后续发送与定时任务也用新模板)。
 
     配置 key(放在 sms_custom 通道的 config JSON 里):
       - finance_summary_receivables : 应收账款摘要模板(占位符 {field} / {field:fmt})
@@ -487,14 +507,39 @@ def _build_content(db: Session, record_type: str, record) -> Tuple[str, str]:
 
     if record_type == "receivables":
         title = "应收账款催收提醒"
-        template = cfg.get("finance_summary_receivables") or (
+        default_template = (
             "【应收】项目{project_name} 客户{customer} 金额¥{amount:,.2f} 计划{plan_date:%Y%m%d}"
         )
+        cfg_key = "finance_summary_receivables"
     else:
         title = "财务借支催收提醒"
-        template = cfg.get("finance_summary_trust") or (
+        default_template = (
             "【借支】{employee} 科目{subject_name} 余额¥{balance:,.2f} 计划{plan_repay_date:%Y%m%d}"
         )
+        cfg_key = "finance_summary_trust"
+
+    if override_template is not None and (override_template or "").strip():
+        template = override_template
+        # 持久化: 回写 cfg,确保下次/定时任务也用新模板
+        try:
+            ch = db.query(NotificationChannel).filter(
+                NotificationChannel.type == "sms_custom"
+            ).first()
+            if ch:
+                cur = {}
+                if ch.config:
+                    try:
+                        cur = json.loads(ch.config)
+                    except Exception:
+                        cur = {}
+                cur[cfg_key] = template
+                ch.config = json.dumps(cur, ensure_ascii=False)
+                db.add(ch)
+                db.commit()
+        except Exception as e:
+            log.warning(f"[finance] 回写模板失败: {e}")
+    else:
+        template = cfg.get(cfg_key) or default_template
 
     content = render_summary(template, record, default_missing)
     content = trim_to_chars(content, max_chars)
@@ -564,13 +609,16 @@ def _try_send_one_channel(db: Session, ctype: str, record_type: str, record, tit
 
 
 def send_sms_for_record(db: Session, record_type: str, record, frequency: str, operator,
-                        channels: Optional[List[str]] = None) -> Dict[str, Any]:
+                        channels: Optional[List[str]] = None,
+                        custom_template: Optional[str] = None) -> Dict[str, Any]:
     """对单条记录触发催款.
     channels: 本次允许走的通道顺序(子集), 例如 ['sms_custom','dingtalk_corp','wechat_mp'].
               默认按 DEFAULT_CHANNEL_ORDER 顺序, 命中可用通道即停止, 写一条日志.
+    custom_template: 本次发送使用的模板(覆盖 cfg 中的 finance_summary_*);
+                     若非空,会同步写回 cfg 持久化。
     返回: {ok, status, channel, error?}
     """
-    title, content = _build_content(db, record_type, record)
+    title, content = _build_content(db, record_type, record, override_template=custom_template)
     phone = (record.phone or "").strip() if hasattr(record, "phone") else ""
     recipient = (record.customer or record.sales_person) if record_type == "receivables" else (record.employee or record.owner)
 
